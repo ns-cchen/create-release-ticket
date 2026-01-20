@@ -1,0 +1,40 @@
+[tool.poetry]
+name = "create-release-ticket"
+version = "0.1.0"
+description = "CLI tool to automate QueryService deployment ticket creation"
+authors = ["cchen <cchen@netskope.com>"]
+readme = "README.md"
+packages = [{include = "create_release_ticket", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+httpx = "^0.27.0"
+click = "^8.1.7"
+pydantic = "^2.6.0"
+pydantic-settings = "^2.2.0"
+python-dotenv = "^1.0.1"
+rich = "^13.7.0"
+pyyaml = "^6.0.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-asyncio = "^0.23.0"
+ruff = "^0.2.0"
+
+[tool.poetry.scripts]
+create-release-ticket = "create_release_ticket.cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]  # Allow long lines for Jira template content
+
+[tool.ruff.lint.per-file-ignores]
+"src/create_release_ticket/templates/*.py" = ["E501"]

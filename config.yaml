@@ -1,0 +1,48 @@
+# Create Release Ticket Configuration
+# You can modify these default values as needed
+
+jira:
+  base_url: "https://netskope.atlassian.net"
+  project_id: "10011"
+  # Issue type IDs
+  promote_issue_type_id: "7"
+  deployment_issue_type_id: "10940"
+  # Component
+  component_id: "13002"
+  component_name: "Query Service (QS)"
+  # User ID (your Jira account ID)
+  user_id: "712020:eedcb6b5-b34f-4247-a4a6-da3203c1fc7d"
+  # Transition IDs
+  done_transition_id: "761"
+
+github:
+  owner: "netSkope"
+  repo: "query-engine"
+  workflow_file: "ep-falcon-distribution.yml"
+  # Default notify emails for workflow
+  notify_emails: "bgururajan@netskope.com rsindhu@netskope.com"
+  # Default destinations
+  destinations: "commercial:pre-prod commercial:prod"
+  manifest_service: "queryservice"
+
+jenkins:
+  job_name: "one_button_queryservice"
+  # Fixed parameters
+  regions: "America"
+  pop_types: "MP"
+  pops: "devint-automation-iad0-nc1"
+  slack_channel: "#queryservice-deployments,#eng-deployments,#deployments"
+  stork_component_name: "queryservice"
+  run_qe_pdv: "DEPLOY_AND_PDV"
+  pdv_config_image_tag: "2.0.121"
+  # Polling settings
+  poll_interval_seconds: 30
+  timeout_minutes: 60
+
+# Timezone for ticket dates
+timezone: "+08:00"
+
+# Retry settings
+retry:
+  max_attempts: 3
+  backoff_seconds: 2
