@@ -19,6 +19,8 @@ def cleanup_resources(
     """Clean up resources created during a failed run.
 
     Notes:
+    - Only closes promote ticket (temporary workflow trigger).
+    - Keeps deployment ticket open (tracks actual deployment, close manually after deployment).
     - Most Jira projects do not allow deleting issues; we close (resolve) instead.
     - For Story tickets with PR attached, resolution must be Fixed.
     """
@@ -35,27 +37,16 @@ def cleanup_resources(
     if close_tickets:
         jira = JiraClient()
 
-        # Close deployment ticket first (it links to promote ticket)
+        # Note: We do NOT close the deployment ticket here.
+        # Deployment tickets track actual production deployment and should remain open
+        # until deployment is complete. Close them manually after deployment.
         if state.deployment_ticket_key:
-            try:
-                transition_fields = jira.prepare_resolve_fixed(
-                    state.deployment_ticket_key,
-                    fix_version_label=None,
-                    sub_component_label="queryservice",
-                    add_no_code_label=True,
-                )
-                jira.transition_issue(
-                    state.deployment_ticket_key,
-                    transition_name="Resolve Issue",
-                    resolution="Fixed",
-                    fields=transition_fields,
-                )
-            except Exception as e:
-                console.print(
-                    f"[yellow]Could not close {state.deployment_ticket_key}: {e}[/yellow]"
-                )
+            console.print(
+                f"[yellow]Keeping deployment ticket open: {state.deployment_ticket_key} "
+                f"(close manually after deployment)[/yellow]"
+            )
 
-        # Close promote ticket
+        # Close promote ticket (temporary workflow trigger ticket)
         if state.promote_ticket_key:
             try:
                 transition_fields = jira.prepare_resolve_fixed(

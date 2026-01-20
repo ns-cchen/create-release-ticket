@@ -99,17 +99,6 @@ poetry run create-release-ticket run \
   --rollback-version queryservice-release-YYYY.MM.W.P.DRONE \
   --previous-branch queryservice-release-YYYY.MM.W \
   --ref queryservice-release-YYYY.MM.W \
-  -v
-```
-
-Optional: relate the newly-created deployment ticket to a previous deployment ticket:
-
-```bash
-poetry run create-release-ticket run \
-  --build-version queryservice-release-YYYY.MM.W.P.DRONE \
-  --rollback-version queryservice-release-YYYY.MM.W.P.DRONE \
-  --previous-branch queryservice-release-YYYY.MM.W \
-  --ref queryservice-release-YYYY.MM.W \
   --previous-deployment-ticket ENG-857076 \
   -v
 ```

@@ -529,23 +529,40 @@ def _run_workflow(
         else:
             jira = JiraClient()
 
-            fix_version_label = derive_fix_version_label(state.build_version)
+            # Check current ticket status first - skip if already closed
+            try:
+                issue = jira.get_issue(state.promote_ticket_key)
+                current_status = issue["fields"]["status"]["name"]
+                resolution = (issue["fields"].get("resolution") or {}).get("name")
 
-            # ENG promote ticket workflow uses "Resolve Issue".
-            # This project requires a resolution; when a PR is attached Jira enforces
-            # Resolution=Fixed.
-            transition_fields = jira.prepare_resolve_fixed(
-                state.promote_ticket_key,
-                fix_version_label=fix_version_label,
-                sub_component_label="queryservice",
-                add_no_code_label=False,
-            )
-            jira.transition_issue(
-                state.promote_ticket_key,
-                transition_name="Resolve Issue",
-                resolution="Fixed",
-                fields=transition_fields,
-            )
+                # If ticket is already in a terminal state, skip transition
+                if current_status in ("Resolved", "Closed", "Done") or resolution:
+                    console.print(
+                        f"  [green]✓ Ticket already closed (status={current_status}, "
+                        f"resolution={resolution or 'N/A'})[/green]"
+                    )
+                else:
+                    # Ticket still open, proceed with transition
+                    fix_version_label = derive_fix_version_label(state.build_version)
+
+                    # ENG promote ticket workflow uses "Resolve Issue".
+                    # This project requires a resolution; when a PR is attached Jira enforces
+                    # Resolution=Fixed.
+                    transition_fields = jira.prepare_resolve_fixed(
+                        state.promote_ticket_key,
+                        fix_version_label=fix_version_label,
+                        sub_component_label="queryservice",
+                        add_no_code_label=False,
+                    )
+                    jira.transition_issue(
+                        state.promote_ticket_key,
+                        transition_name="Resolve Issue",
+                        resolution="Fixed",
+                        fields=transition_fields,
+                    )
+            except Exception as e:
+                console.print(f"[yellow]Warning: Could not check/close promote ticket: {e}[/yellow]")
+                console.print(f"[yellow]You may need to close {state.promote_ticket_key} manually[/yellow]")
 
         state.mark_step(RunStep.CLOSED_PROMOTE_TICKET)
         if maybe_stop(RunStep.CLOSED_PROMOTE_TICKET):
