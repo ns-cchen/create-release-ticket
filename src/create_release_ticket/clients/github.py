@@ -44,7 +44,9 @@ class GitHubClient(BaseClient):
             response = self.get("/user")
             if response.status_code == 200:
                 user = response.json()
-                console.print(f"[green]✓ GitHub: Authenticated as {user.get('login', 'Unknown')}[/green]")
+                console.print(
+                    f"[green]✓ GitHub: Authenticated as {user.get('login', 'Unknown')}[/green]"
+                )
                 return True
             return False
         except Exception as e:
@@ -117,9 +119,7 @@ class GitHubClient(BaseClient):
         )
 
         if response.status_code not in (200, 204):
-            raise Exception(
-                f"Failed to trigger workflow: {response.status_code} - {response.text}"
-            )
+            raise Exception(f"Failed to trigger workflow: {response.status_code} - {response.text}")
 
         console.print(f"[green]✓ Triggered workflow {workflow_file}[/green]")
         return True
@@ -128,31 +128,51 @@ class GitHubClient(BaseClient):
         self,
         workflow_file: str,
         wait_seconds: int = 5,
+        triggered_after: str | None = None,
+        max_attempts: int = 12,
     ) -> dict[str, Any] | None:
         """
         Get the latest workflow run for a workflow file.
 
         Args:
             workflow_file: Workflow filename
-            wait_seconds: Seconds to wait before querying (to let GitHub register the run)
+            wait_seconds: Seconds to wait between polling attempts
+            triggered_after: ISO timestamp - only return runs created after this time
+            max_attempts: Maximum number of polling attempts to find the new run
 
         Returns:
             Workflow run data or None
         """
-        # Wait a bit for GitHub to register the run
-        time.sleep(wait_seconds)
+        for attempt in range(max_attempts):
+            # Wait before querying (to let GitHub register the run)
+            time.sleep(wait_seconds)
 
-        response = self.get(
-            f"/repos/{self.owner}/{self.repo}/actions/workflows/{workflow_file}/runs",
-            params={"per_page": 1, "event": "workflow_dispatch"},
-        )
+            response = self.get(
+                f"/repos/{self.owner}/{self.repo}/actions/workflows/{workflow_file}/runs",
+                params={"per_page": 5, "event": "workflow_dispatch"},
+            )
 
-        if response.status_code != 200:
-            return None
+            if response.status_code != 200:
+                continue
 
-        runs = response.json().get("workflow_runs", [])
-        if runs:
-            return runs[0]
+            runs = response.json().get("workflow_runs", [])
+            for run in runs:
+                # If we have a triggered_after timestamp, only accept runs created after it
+                if triggered_after:
+                    run_created_at = run.get("created_at", "")
+                    if run_created_at > triggered_after:
+                        return run
+                else:
+                    # No timestamp filter, return the first (most recent) run
+                    if runs:
+                        return runs[0]
+
+            # Log retry attempt
+            if attempt < max_attempts - 1:
+                console.print(
+                    f"[yellow]Waiting for new workflow run to appear (attempt {attempt + 1}/{max_attempts})...[/yellow]"
+                )
+
         return None
 
     def get_workflow_run(self, run_id: int) -> dict[str, Any]:
@@ -219,8 +239,7 @@ class GitHubClient(BaseClient):
                         return run_data
                     else:
                         raise Exception(
-                            f"Workflow failed with conclusion: {conclusion}\n"
-                            f"See: {html_url}"
+                            f"Workflow failed with conclusion: {conclusion}\n" f"See: {html_url}"
                         )
 
                 time.sleep(poll_interval)
@@ -246,19 +265,31 @@ class GitHubClient(BaseClient):
         Returns:
             Final workflow run data
         """
+        from datetime import datetime
+
         workflow_file = self.github_config.workflow_file
+
+        # Capture timestamp before triggering to filter out stale runs
+        triggered_at = datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Trigger the workflow
         self.trigger_workflow(workflow_file, ref, inputs)
 
-        # Get the run that was just triggered
-        run = self.get_latest_workflow_run(workflow_file, wait_seconds=5)
+        # Get the run that was just triggered (must be created after triggered_at)
+        run = self.get_latest_workflow_run(
+            workflow_file,
+            wait_seconds=5,
+            triggered_after=triggered_at,
+            max_attempts=12,  # Up to 60 seconds of waiting
+        )
         if not run:
-            raise Exception("Could not find the triggered workflow run")
+            raise Exception("Could not find the triggered workflow run after 60 seconds")
 
         run_id = run["id"]
         console.print(f"[blue]Workflow run ID: {run_id}[/blue]")
-        console.print(f"[blue]URL: https://github.com/{self.owner}/{self.repo}/actions/runs/{run_id}[/blue]")
+        console.print(
+            f"[blue]URL: https://github.com/{self.owner}/{self.repo}/actions/runs/{run_id}[/blue]"
+        )
 
         # Poll until completion
         return self.poll_workflow_run(run_id, poll_interval, timeout_minutes)

@@ -136,9 +136,7 @@ class JenkinsClient(BaseClient):
         Returns:
             Build data
         """
-        response = self.get(
-            f"/job/{self.jenkins_config.job_name}/{build_number}/api/json"
-        )
+        response = self.get(f"/job/{self.jenkins_config.job_name}/{build_number}/api/json")
 
         if response.status_code != 200:
             raise Exception(f"Failed to get build {build_number}: {response.status_code}")
@@ -155,9 +153,7 @@ class JenkinsClient(BaseClient):
         Returns:
             True if cancelled successfully
         """
-        response = self.post(
-            f"/job/{self.jenkins_config.job_name}/{build_number}/stop"
-        )
+        response = self.post(f"/job/{self.jenkins_config.job_name}/{build_number}/stop")
 
         if response.status_code not in (200, 302):
             console.print(f"[yellow]Warning: Could not cancel build {build_number}[/yellow]")
@@ -166,6 +162,73 @@ class JenkinsClient(BaseClient):
         console.print(f"[green]✓ Cancelled build {build_number}[/green]")
         return True
 
+    def wait_for_build_start(
+        self,
+        queue_url: str,
+        poll_interval: int | None = None,
+        timeout_minutes: int = 10,
+    ) -> dict[str, Any]:
+        """
+        Wait for build to start and return build info.
+
+        This is phase 1 of the build process - waiting in queue until build starts.
+
+        Args:
+            queue_url: Queue URL from trigger response
+            poll_interval: Seconds between polls
+            timeout_minutes: Maximum minutes to wait for build to start
+
+        Returns:
+            Dict with build_number and job_url
+
+        Raises:
+            Exception if build doesn't start within timeout
+        """
+        if poll_interval is None:
+            poll_interval = self.jenkins_config.poll_interval_seconds
+
+        max_polls = (timeout_minutes * 60) // poll_interval
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("[cyan]Waiting in Jenkins queue...", total=None)
+
+            for _ in range(max_polls):
+                try:
+                    queue_item = self.get_queue_item(queue_url)
+
+                    if "executable" in queue_item:
+                        build_number = queue_item["executable"]["number"]
+                        job_url = queue_item["executable"]["url"]
+                        console.print(f"[green]✓ Build #{build_number} started[/green]")
+                        console.print(f"[blue]URL: {job_url}[/blue]")
+                        return {
+                            "build_number": build_number,
+                            "job_url": job_url,
+                        }
+                    elif queue_item.get("cancelled"):
+                        raise Exception("Build was cancelled in queue")
+                    else:
+                        why = queue_item.get("why", "Waiting...")
+                        progress.update(
+                            task,
+                            description=f"[cyan]In queue: {why[:60]}...",
+                        )
+                except Exception as e:
+                    if "Failed to get queue item" not in str(e):
+                        raise
+                    # Queue item might have expired, continue trying
+
+                time.sleep(poll_interval)
+
+        raise Exception(
+            f"Build did not start within {timeout_minutes} minutes\n" f"Queue URL: {queue_url}"
+        )
+
     def poll_build(
         self,
         queue_url: str,
@@ -173,10 +236,42 @@ class JenkinsClient(BaseClient):
         timeout_minutes: int | None = None,
     ) -> dict[str, Any]:
         """
-        Poll build until completion.
+        Poll build until completion (legacy method that combines both phases).
 
         Args:
             queue_url: Queue URL from trigger response
+            poll_interval: Seconds between polls
+            timeout_minutes: Maximum minutes to wait
+
+        Returns:
+            Final build data with job_url
+
+        Raises:
+            Exception if build fails or times out
+        """
+        # Phase 1: Wait for build to start
+        start_info = self.wait_for_build_start(queue_url, poll_interval, timeout_minutes=10)
+
+        # Phase 2: Poll until completion
+        return self.poll_build_by_number(
+            start_info["build_number"],
+            poll_interval,
+            timeout_minutes,
+        )
+
+    def poll_build_by_number(
+        self,
+        build_number: int,
+        poll_interval: int | None = None,
+        timeout_minutes: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Poll an existing build by number until completion.
+
+        Use this when resuming from a previously triggered build.
+
+        Args:
+            build_number: Build number to poll
             poll_interval: Seconds between polls
             timeout_minutes: Maximum minutes to wait
 
@@ -192,8 +287,7 @@ class JenkinsClient(BaseClient):
             timeout_minutes = self.jenkins_config.timeout_minutes
 
         max_polls = (timeout_minutes * 60) // poll_interval
-        build_number: int | None = None
-        job_url: str | None = None
+        job_url = f"{self.base_job_url}/{build_number}/"
 
         with Progress(
             SpinnerColumn(),
@@ -201,80 +295,53 @@ class JenkinsClient(BaseClient):
             TimeElapsedColumn(),
             console=console,
         ) as progress:
-            task = progress.add_task("[cyan]Waiting in Jenkins queue...", total=None)
+            task = progress.add_task(
+                f"[cyan]Resuming poll for build #{build_number}...",
+                total=None,
+            )
 
-            for poll_count in range(max_polls):
-                # First, wait for the build to start (get out of queue)
-                if build_number is None:
-                    try:
-                        queue_item = self.get_queue_item(queue_url)
+            for _ in range(max_polls):
+                build_data = self.get_build(build_number)
+                building = build_data.get("building", True)
+                result = build_data.get("result")
 
-                        if "executable" in queue_item:
-                            build_number = queue_item["executable"]["number"]
-                            job_url = queue_item["executable"]["url"]
-                            progress.update(
-                                task,
-                                description=f"[cyan]Build #{build_number} started | {job_url}",
-                            )
-                        elif queue_item.get("cancelled"):
-                            raise Exception("Build was cancelled in queue")
-                        else:
-                            why = queue_item.get("why", "Waiting...")
-                            progress.update(
-                                task,
-                                description=f"[cyan]In queue: {why[:50]}...",
-                            )
-                            time.sleep(poll_interval)
-                            continue
-                    except Exception as e:
-                        if "Failed to get queue item" in str(e):
-                            # Queue item might have expired, try to find build
-                            time.sleep(poll_interval)
-                            continue
-                        raise
-
-                # Now poll the build status
-                if build_number is not None:
-                    build_data = self.get_build(build_number)
-                    building = build_data.get("building", True)
-                    result = build_data.get("result")
-
-                    if not building:
-                        if result == "SUCCESS":
-                            console.print(f"[green]✓ Jenkins build #{build_number} completed successfully[/green]")
-                            console.print(f"[blue]URL: {job_url}[/blue]")
-                            return {
-                                "build_number": build_number,
-                                "job_url": job_url,
-                                "result": result,
-                                "data": build_data,
-                            }
-                        else:
-                            raise Exception(
-                                f"Jenkins build #{build_number} failed with result: {result}\n"
-                                f"See: {job_url}"
-                            )
-
-                    # Still building
-                    duration_ms = build_data.get("duration", 0)
-                    estimated_ms = build_data.get("estimatedDuration", 0)
-                    if estimated_ms > 0:
-                        pct = min(100, int(duration_ms / estimated_ms * 100))
-                        progress.update(
-                            task,
-                            description=f"[cyan]Build #{build_number} running ({pct}%) | {job_url}",
+                if not building:
+                    if result == "SUCCESS":
+                        console.print(
+                            f"[green]✓ Jenkins build #{build_number} completed successfully[/green]"
                         )
+                        console.print(f"[blue]URL: {job_url}[/blue]")
+                        return {
+                            "build_number": build_number,
+                            "job_url": job_url,
+                            "result": result,
+                            "data": build_data,
+                        }
                     else:
-                        progress.update(
-                            task,
-                            description=f"[cyan]Build #{build_number} running... | {job_url}",
+                        raise Exception(
+                            f"Jenkins build #{build_number} failed with result: {result}\n"
+                            f"See: {job_url}"
                         )
+
+                # Still building
+                duration_ms = build_data.get("duration", 0)
+                estimated_ms = build_data.get("estimatedDuration", 0)
+                if estimated_ms > 0:
+                    pct = min(100, int(duration_ms / estimated_ms * 100))
+                    progress.update(
+                        task,
+                        description=f"[cyan]Build #{build_number} running ({pct}%) | {job_url}",
+                    )
+                else:
+                    progress.update(
+                        task,
+                        description=f"[cyan]Build #{build_number} running... | {job_url}",
+                    )
 
                 time.sleep(poll_interval)
 
         raise Exception(
-            f"Jenkins build timed out after {timeout_minutes} minutes\n"
-            f"See: {job_url or queue_url}"
+            f"Jenkins build timed out after {timeout_minutes} minutes\n" f"See: {job_url}"
         )
 
     def trigger_and_wait(

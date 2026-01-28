@@ -62,9 +62,7 @@ def cleanup_resources(
                     fields=transition_fields,
                 )
             except Exception as e:
-                console.print(
-                    f"[yellow]Could not close {state.promote_ticket_key}: {e}[/yellow]"
-                )
+                console.print(f"[yellow]Could not close {state.promote_ticket_key}: {e}[/yellow]")
 
     if cancel_jenkins and state.jenkins_build_number:
         try:

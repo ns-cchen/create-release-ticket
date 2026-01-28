@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 from create_release_ticket.config import get_app_config
@@ -14,12 +14,14 @@ def _build_jira_inline_cards(jira_ids: list[str]) -> list[dict[str, Any]]:
 
     for jira_id in jira_ids:
         nodes.append({"type": "hardBreak"})
-        nodes.append({
-            "type": "inlineCard",
-            "attrs": {
-                "url": f"https://netskope.atlassian.net/browse/{jira_id}",
-            },
-        })
+        nodes.append(
+            {
+                "type": "inlineCard",
+                "attrs": {
+                    "url": f"https://netskope.atlassian.net/browse/{jira_id}",
+                },
+            }
+        )
         nodes.append({"type": "text", "text": " "})
 
     return nodes
@@ -60,22 +62,26 @@ def build_deployment_ticket_payload(
     # Format dates
     date_str = deploy_date.strftime("%m/%d/%Y")
 
-    def parse_tz_offset(value: str) -> timezone:
+    def parse_tz_offset(value: str) -> datetime.tzinfo:
         v = value.strip()
         if v.upper() == "Z":
-            return timezone.utc
+            return datetime.UTC
 
         # Accept "+08:00", "+0800", "-07:00", "-0700"
         if len(v) == 5 and (v[0] in "+-") and v[1:].isdigit():
             sign = 1 if v[0] == "+" else -1
             hours = int(v[1:3])
             minutes = int(v[3:5])
-        elif len(v) == 6 and (v[0] in "+-") and v[1:3].isdigit() and v[3] == ":" and v[4:6].isdigit():
+        elif (
+            len(v) == 6 and (v[0] in "+-") and v[1:3].isdigit() and v[3] == ":" and v[4:6].isdigit()
+        ):
             sign = 1 if v[0] == "+" else -1
             hours = int(v[1:3])
             minutes = int(v[4:6])
         else:
             raise ValueError(f"Unsupported timezone offset format: {value}")
+
+        from datetime import timezone
 
         return timezone(sign * timedelta(hours=hours, minutes=minutes))
 
@@ -88,7 +94,9 @@ def build_deployment_ticket_payload(
     def on_date(base: datetime, hour: int, minute: int) -> datetime:
         return base.replace(hour=hour, minute=minute, second=0, microsecond=0, tzinfo=tzinfo)
 
-    def window(base: datetime, start_hm: tuple[int, int], end_hm: tuple[int, int]) -> tuple[str, str]:
+    def window(
+        base: datetime, start_hm: tuple[int, int], end_hm: tuple[int, int]
+    ) -> tuple[str, str]:
         start = on_date(base, *start_hm)
         end = on_date(base, *end_hm)
         if end <= start:
@@ -105,7 +113,9 @@ def build_deployment_ticket_payload(
     summary = f"<QueryService><{date_str}><{build_version}>"
 
     # Build description content
-    compare_url = f"https://github.com/netSkope/query-engine/compare/{previous_branch}...{current_branch}"
+    compare_url = (
+        f"https://github.com/netSkope/query-engine/compare/{previous_branch}...{current_branch}"
+    )
     promote_ticket_url = f"https://netskope.atlassian.net/browse/{promote_ticket_key}/"
 
     # Build the Key JIRAs paragraph with dynamic inline cards
@@ -210,7 +220,11 @@ def build_deployment_ticket_payload(
             "content": [
                 {"type": "text", "text": "PDV_CONFIG_IMAGE_TAG", "marks": [{"type": "strong"}]},
                 {"type": "hardBreak"},
-                {"type": "text", "text": config.jenkins.pdv_config_image_tag, "marks": [{"type": "code"}]},
+                {
+                    "type": "text",
+                    "text": config.jenkins.pdv_config_image_tag,
+                    "marks": [{"type": "code"}],
+                },
             ],
         },
         # Slack Channels
@@ -262,9 +276,14 @@ def build_deployment_ticket_payload(
                 {"type": "text", "text": "Update "},
                 {
                     "type": "inlineCard",
-                    "attrs": {"url": "https://netskope.atlassian.net/wiki/spaces/ENG/pages/3824189863/GOV+environment+builds"},
+                    "attrs": {
+                        "url": "https://netskope.atlassian.net/wiki/spaces/ENG/pages/3824189863/GOV+environment+builds"
+                    },
                 },
-                {"type": "text", "text": " with build version after deployment is complete in Prod:"},
+                {
+                    "type": "text",
+                    "text": " with build version after deployment is complete in Prod:",
+                },
             ],
         },
         # Deployment document
@@ -274,7 +293,9 @@ def build_deployment_ticket_payload(
                 {"type": "text", "text": "Deployment document: "},
                 {
                     "type": "inlineCard",
-                    "attrs": {"url": "https://netskope.atlassian.net/wiki/spaces/ENG/pages/3713827182/QueryService+SelfService+Deployment"},
+                    "attrs": {
+                        "url": "https://netskope.atlassian.net/wiki/spaces/ENG/pages/3713827182/QueryService+SelfService+Deployment"
+                    },
                 },
             ],
         },
@@ -323,7 +344,10 @@ def build_deployment_ticket_payload(
             ],
             "reporter": {"id": jira_config.user_id},
             "customfield_20803": [
-                {"id": "22961", "value": "No downtime / No inline impact / No customer action required"},
+                {
+                    "id": "22961",
+                    "value": "No downtime / No inline impact / No customer action required",
+                },
             ],
             "customfield_20823": build_version,
             "customfield_15000": [],
@@ -368,23 +392,51 @@ def _build_deployment_order_table() -> dict[str, Any]:
                 ],
             },
             # Data rows
-            _table_row(["APAC + Europe (Day1)", "SIN2", "c1", "Between 6AM AND 10AM PST", "OnCall/SRE runs the deployment. PDV runs as part of the deployment."]),
-            _table_row(["APAC + Europe (Day1)", "FR4", "c4", "Between 12 Noon and 7 PM PST", "When PDV fails, rerun the PDV with PDV-only option."]),
-            _table_row(["Australia + US + EU (Day2)", "MEL2", "c1", "Between 6AM AND 10AM PST", ""]),
+            _table_row(
+                [
+                    "APAC + Europe (Day1)",
+                    "SIN2",
+                    "c1",
+                    "Between 6AM AND 10AM PST",
+                    "OnCall/SRE runs the deployment. PDV runs as part of the deployment.",
+                ]
+            ),
+            _table_row(
+                [
+                    "APAC + Europe (Day1)",
+                    "FR4",
+                    "c4",
+                    "Between 12 Noon and 7 PM PST",
+                    "When PDV fails, rerun the PDV with PDV-only option.",
+                ]
+            ),
+            _table_row(
+                ["Australia + US + EU (Day2)", "MEL2", "c1", "Between 6AM AND 10AM PST", ""]
+            ),
             _table_row(["Australia + US + EU (Day2)", "SJC1", "c4", "After 8PM PST", ""]),
             _table_row(["Australia + US + EU (Day2)", "SJC2", "c1", "After 8PM PST", ""]),
             _table_row(["Australia + US + EU (Day2)", "DFW3", "c1", "After 8PM PST", ""]),
-            _table_row(["Australia + US + EU (Day2)", "RUH1", "c1", "Between 12 Noon and 5 PM PST", ""]),
-            _table_row(["Australia + US + EU (Day2)", "FRA2", "c1", "Between 12 Noon and 5 PM PST", ""]),
-            _table_row(["Australia + US + EU (Day2)", "LON3", "c1", "Between 12 Noon and 5 PM PST", ""]),
-            _table_row(["Australia + US + EU (Day2)", "ZUR2", "c1", "Between 12 Noon and 5 PM PST", ""]),
-            _table_row([
-                "END of Day 3",
-                "Update GOV wiki",
-                "",
-                "AFTER all prod deployments are completed.",
-                "",
-            ]),
+            _table_row(
+                ["Australia + US + EU (Day2)", "RUH1", "c1", "Between 12 Noon and 5 PM PST", ""]
+            ),
+            _table_row(
+                ["Australia + US + EU (Day2)", "FRA2", "c1", "Between 12 Noon and 5 PM PST", ""]
+            ),
+            _table_row(
+                ["Australia + US + EU (Day2)", "LON3", "c1", "Between 12 Noon and 5 PM PST", ""]
+            ),
+            _table_row(
+                ["Australia + US + EU (Day2)", "ZUR2", "c1", "Between 12 Noon and 5 PM PST", ""]
+            ),
+            _table_row(
+                [
+                    "END of Day 3",
+                    "Update GOV wiki",
+                    "",
+                    "AFTER all prod deployments are completed.",
+                    "",
+                ]
+            ),
         ],
     }
 

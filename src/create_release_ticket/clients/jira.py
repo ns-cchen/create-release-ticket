@@ -245,7 +245,9 @@ class JiraClient(BaseClient):
         response = self.delete(f"/rest/api/3/issue/{issue_key}")
 
         if response.status_code not in (200, 204):
-            raise Exception(f"Failed to delete {issue_key}: {response.status_code} - {response.text}")
+            raise Exception(
+                f"Failed to delete {issue_key}: {response.status_code} - {response.text}"
+            )
 
         console.print(f"[green]✓ Deleted issue {issue_key}[/green]")
         return True
@@ -307,9 +309,7 @@ class JiraClient(BaseClient):
                 f"{response.status_code} - {response.text}"
             )
 
-        console.print(
-            f"[green]✓ Linked {outward_issue_key} relates to {inward_issue_key}[/green]"
-        )
+        console.print(f"[green]✓ Linked {outward_issue_key} relates to {inward_issue_key}[/green]")
         return True
 
         return True
@@ -325,7 +325,9 @@ class JiraClient(BaseClient):
             response = self.get("/rest/api/3/myself")
             if response.status_code == 200:
                 user = response.json()
-                console.print(f"[green]✓ Jira: Authenticated as {user.get('displayName', 'Unknown')}[/green]")
+                console.print(
+                    f"[green]✓ Jira: Authenticated as {user.get('displayName', 'Unknown')}[/green]"
+                )
                 return True
             return False
         except Exception as e:

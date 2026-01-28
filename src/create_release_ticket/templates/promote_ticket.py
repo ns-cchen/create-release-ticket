@@ -70,7 +70,6 @@ def build_promote_ticket_payload(
                     "name": jira_config.component_name,
                 }
             ],
-            "customfield_15000": [],
             "assignee": {"id": jira_config.user_id},
             "reporter": {"id": jira_config.user_id},
             "customfield_10004": 0,
@@ -79,9 +78,16 @@ def build_promote_ticket_payload(
             "customfield_15000": [{"id": "21484"}],
             # These fields are required to resolve as Fixed in ENG workflow.
             "customfield_12502": {"id": "10503"},
-            "customfield_12503": "NA",
-            "customfield_16630": ["NA"],
-            "customfield_16629": [build_version],
+            "customfield_12503": {
+                "type": "doc",
+                "version": 1,
+                "content": [
+                    {"type": "paragraph", "content": [{"type": "text", "text": "NA"}]},
+                ],
+            },
+            # NOTE: customfield_16629 and customfield_16630 are resolve-screen-only fields.
+            # They cannot be set at issue creation time - Jira returns 400 error.
+            # These should be set during the transition/resolve step if needed.
             "fixVersions": [],
             # Allows Fix Version to be empty/NA in some workflows.
             "labels": ["no-code"],

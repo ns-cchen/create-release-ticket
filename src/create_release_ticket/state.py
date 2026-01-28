@@ -57,6 +57,7 @@ class RunState:
     previous_deployment_ticket_key: str | None = None
     deployment_ticket_relates_linked: bool = False
     github_workflow_run_id: int | None = None
+    jenkins_queue_url: str | None = None
     jenkins_build_number: int | None = None
     jenkins_job_url: str | None = None
 
@@ -107,9 +108,13 @@ class RunState:
             console.print("[green]✓ Cleared state file[/green]")
 
     def mark_step(self, step: RunStep) -> None:
-        """Mark current step and save state."""
-        self.current_step = step
-        self.save()
+        """Mark current step and save state (only advances forward, never regresses)."""
+        step_order = list(RunStep)
+        current_idx = step_order.index(self.current_step)
+        new_idx = step_order.index(step)
+        if new_idx > current_idx:
+            self.current_step = step
+            self.save()
 
     def mark_error(self, step: str, message: str) -> None:
         """Mark error and save state."""

@@ -6,7 +6,7 @@ import json
 import re
 import signal
 import sys
-from datetime import datetime
+from datetime import UTC
 from typing import Any
 
 import click
@@ -169,6 +169,12 @@ def main() -> None:
     help="Use an existing Jenkins job URL instead of triggering a new build",
 )
 @click.option(
+    "--github-run-id",
+    type=int,
+    default=None,
+    help="Use an existing GitHub workflow run ID instead of triggering a new workflow",
+)
+@click.option(
     "--resume",
     is_flag=True,
     help="Resume from last interrupted run",
@@ -190,6 +196,7 @@ def run(
     stop_after: str | None,
     jenkins_build_number: int | None,
     jenkins_job_url: str | None,
+    github_run_id: int | None,
     resume: bool,
     verbose: bool,
 ) -> None:
@@ -224,7 +231,9 @@ def run(
             state = None
 
         if not build_version or not rollback_version:
-            raise click.BadParameter("Missing required options: --build-version and --rollback-version")
+            raise click.BadParameter(
+                "Missing required options: --build-version and --rollback-version"
+            )
 
         # Validate inputs
         if not validate_version_format(build_version):
@@ -265,6 +274,11 @@ def run(
             state.jenkins_job_url = jenkins_job_url
             state.mark_step(RunStep.JENKINS_COMPLETED)
 
+        # If the user provides an existing GitHub run ID, record it and skip triggering.
+        if github_run_id is not None:
+            state.github_workflow_run_id = github_run_id
+            state.mark_step(RunStep.GITHUB_WORKFLOW_COMPLETED)
+
         # Run the workflow
         _run_workflow(
             state=state,
@@ -286,8 +300,12 @@ def run(
                     ref=_current_state.ref,
                     previous_branch=previous_branch,
                     jira_ids=jira_ids,
+                    previous_deployment_ticket=previous_deployment_ticket,
                     dry_run=dry_run,
                     stop_after=stop_after,
+                    jenkins_build_number=jenkins_build_number,
+                    jenkins_job_url=jenkins_job_url,
+                    github_run_id=github_run_id,
                     resume=True,
                     verbose=verbose,
                 )
@@ -329,6 +347,7 @@ def _run_workflow(
         state.previous_branch = previous_branch_override or parsed.previous_branch
         console.print(f"  Current branch: {state.current_branch}")
         console.print(f"  Previous branch: {state.previous_branch}")
+        state.save()  # Persist branch data before mark_step
         state.mark_step(RunStep.PARSED_VERSION)
         if maybe_stop(RunStep.PARSED_VERSION):
             return
@@ -357,7 +376,9 @@ def _run_workflow(
             console.print(f"  Using provided Jira IDs: {state.jira_ids}")
         elif dry_run:
             state.jira_ids = ["DINT-0000", "EP-0000"]
-            console.print(f"  [dim]Would fetch commits from {state.previous_branch}...{state.current_branch}[/dim]")
+            console.print(
+                f"  [dim]Would fetch commits from {state.previous_branch}...{state.current_branch}[/dim]"
+            )
         else:
             commits = github.compare_commits(state.previous_branch, state.current_branch)
             state.jira_ids = extract_jira_ids(commits)
@@ -369,6 +390,7 @@ def _run_workflow(
                 )
 
         console.print(f"  Jira IDs: {', '.join(state.jira_ids)}")
+        state.save()  # Persist jira_ids before mark_step
         state.mark_step(RunStep.FETCHED_COMMITS)
         if maybe_stop(RunStep.FETCHED_COMMITS):
             return
@@ -381,7 +403,9 @@ def _run_workflow(
 
         if dry_run:
             console.print("  [dim]Would create promote ticket with payload:[/dim]")
-            console.print(f"  [dim]{json.dumps(promote_payload['fields']['summary'], indent=2)}[/dim]")
+            console.print(
+                f"  [dim]{json.dumps(promote_payload['fields']['summary'], indent=2)}[/dim]"
+            )
             state.promote_ticket_key = "ENG-DRY-RUN"
             state.promote_ticket_id = "0"
         else:
@@ -389,72 +413,140 @@ def _run_workflow(
             result = jira.create_issue(promote_payload)
             state.promote_ticket_key = result["key"]
             state.promote_ticket_id = result["id"]
+            state.save()  # 立即儲存！API 回傳後第一時間儲存
 
         console.print(f"  Promote ticket: {format_jira_url(state.promote_ticket_key)}")
         state.mark_step(RunStep.CREATED_PROMOTE_TICKET)
         if maybe_stop(RunStep.CREATED_PROMOTE_TICKET):
             return
 
-    # Step 4: Trigger GitHub workflow
+    # Step 4: Trigger GitHub workflow (split into TRIGGERED and COMPLETED phases)
     if not state.can_resume_from(RunStep.GITHUB_WORKFLOW_COMPLETED):
-        console.print("\n[bold]Step 4: Trigger GitHub workflow[/bold]")
-
         github = GitHubClient()
 
-        # Extract version for workflow (e.g., v2025.12.2.0.18496 or full version)
-        workflow_inputs = {
-            "release-ticket": state.promote_ticket_key,
-            "release-version": state.build_version,
-            "destinations": config.github.destinations,
-            "manifest-service": config.github.manifest_service,
-            "notify-emails": config.github.notify_emails,
-        }
+        # Phase 4a: Trigger workflow (skip if already triggered)
+        if (
+            not state.can_resume_from(RunStep.TRIGGERED_GITHUB_WORKFLOW)
+            or not state.github_workflow_run_id
+        ):
+            console.print("\n[bold]Step 4a: Trigger GitHub workflow[/bold]")
+
+            workflow_inputs = {
+                "release-ticket": state.promote_ticket_key,
+                "release-version": state.build_version,
+                "destinations": config.github.destinations,
+                "manifest-service": config.github.manifest_service,
+                "notify-emails": config.github.notify_emails,
+            }
+
+            if dry_run:
+                console.print("  [dim]Would trigger workflow with inputs:[/dim]")
+                for k, v in workflow_inputs.items():
+                    console.print(f"    {k}: {v}")
+                state.github_workflow_run_id = 0  # Placeholder for dry run
+            else:
+                from datetime import datetime
+
+                # Trigger the workflow
+                workflow_file = config.github.workflow_file
+                triggered_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                github.trigger_workflow(workflow_file, state.ref, workflow_inputs)
+
+                # Get the run ID
+                run = github.get_latest_workflow_run(
+                    workflow_file,
+                    wait_seconds=5,
+                    triggered_after=triggered_at,
+                    max_attempts=12,
+                )
+                if not run:
+                    raise Exception("Could not find the triggered workflow run after 60 seconds")
+
+                state.github_workflow_run_id = run["id"]
+                console.print(f"  Workflow run ID: {state.github_workflow_run_id}")
+
+            # Save and mark triggered (before waiting)
+            state.save()
+            state.mark_step(RunStep.TRIGGERED_GITHUB_WORKFLOW)
+            if maybe_stop(RunStep.TRIGGERED_GITHUB_WORKFLOW):
+                return
+
+        # Phase 4b: Wait for workflow completion
+        console.print("\n[bold]Step 4b: Wait for GitHub workflow completion[/bold]")
 
         if dry_run:
-            console.print("  [dim]Would trigger workflow with inputs:[/dim]")
-            for k, v in workflow_inputs.items():
-                console.print(f"    {k}: {v}")
+            console.print("  [dim]Would wait for workflow to complete[/dim]")
         else:
-            # Trigger and wait
-            run_result = github.trigger_and_wait_workflow(
-                ref=state.ref,
-                inputs=workflow_inputs,
+            console.print(f"  Resuming poll for workflow run ID: {state.github_workflow_run_id}")
+            github.poll_workflow_run(
+                state.github_workflow_run_id,
                 poll_interval=30,
                 timeout_minutes=20,
             )
-            state.github_workflow_run_id = run_result.get("id")
 
         state.mark_step(RunStep.GITHUB_WORKFLOW_COMPLETED)
         if maybe_stop(RunStep.GITHUB_WORKFLOW_COMPLETED):
             return
 
-    # Step 5: Trigger Jenkins build
-    if not state.can_resume_from(RunStep.JENKINS_COMPLETED) or not state.jenkins_job_url:
-        console.print("\n[bold]Step 5: Trigger Jenkins devint deployment[/bold]")
-
+    # Step 5: Trigger Jenkins build (split into TRIGGERED and COMPLETED phases)
+    if not state.can_resume_from(RunStep.JENKINS_COMPLETED):
         jenkins = JenkinsClient()
 
+        # Phase 5a: Trigger Jenkins (skip if already triggered)
+        if not state.can_resume_from(RunStep.TRIGGERED_JENKINS) or not state.jenkins_queue_url:
+            console.print("\n[bold]Step 5a: Trigger Jenkins devint deployment[/bold]")
+
+            if dry_run:
+                console.print("  [dim]Would trigger Jenkins job with:[/dim]")
+                console.print(f"    RELEASE: {state.build_version}")
+                console.print(f"    TICKET: {state.promote_ticket_key}")
+                state.jenkins_queue_url = "https://jenkins.example.com/queue/item/0/"
+                state.jenkins_build_number = 0
+                state.jenkins_job_url = "https://jenkins.example.com/job/dry-run/0/"
+            else:
+                trigger_result = jenkins.trigger_build(
+                    release_version=state.build_version,
+                    ticket=state.promote_ticket_key,
+                )
+                state.jenkins_queue_url = trigger_result["queue_url"]
+
+            # Save and mark triggered (before waiting)
+            state.save()
+            state.mark_step(RunStep.TRIGGERED_JENKINS)
+            if maybe_stop(RunStep.TRIGGERED_JENKINS):
+                return
+
+        # Phase 5b: Wait for build to start (get build_number)
+        if not state.jenkins_build_number and not dry_run:
+            console.print("\n[bold]Step 5b: Wait for Jenkins build to start[/bold]")
+            console.print(f"  Resuming from queue URL: {state.jenkins_queue_url}")
+
+            start_info = jenkins.wait_for_build_start(state.jenkins_queue_url)
+            state.jenkins_build_number = start_info["build_number"]
+            state.jenkins_job_url = start_info["job_url"]
+            state.save()  # Save build info immediately
+
+        # Phase 5c: Wait for build completion
+        console.print("\n[bold]Step 5c: Wait for Jenkins build completion[/bold]")
+
         if dry_run:
-            console.print("  [dim]Would trigger Jenkins job with:[/dim]")
-            console.print(f"    RELEASE: {state.build_version}")
-            console.print(f"    TICKET: {state.promote_ticket_key}")
-            state.jenkins_job_url = "https://jenkins.example.com/job/dry-run/1"
-            state.jenkins_build_number = 0
+            console.print("  [dim]Would wait for Jenkins build to complete[/dim]")
         else:
-            result = jenkins.trigger_and_wait(
-                release_version=state.build_version,
-                ticket=state.promote_ticket_key,
-            )
-            state.jenkins_build_number = result["build_number"]
-            state.jenkins_job_url = result["job_url"]
+            console.print(f"  Polling build #{state.jenkins_build_number}: {state.jenkins_job_url}")
+            result = jenkins.poll_build_by_number(state.jenkins_build_number)
+            state.jenkins_job_url = result["job_url"]  # Update with final URL
 
         console.print(f"  Jenkins job: {state.jenkins_job_url}")
+        state.save()
         state.mark_step(RunStep.JENKINS_COMPLETED)
         if maybe_stop(RunStep.JENKINS_COMPLETED):
             return
 
     # Step 6: Create deployment ticket
-    if not state.can_resume_from(RunStep.CREATED_DEPLOYMENT_TICKET) or not state.deployment_ticket_key:
+    if (
+        not state.can_resume_from(RunStep.CREATED_DEPLOYMENT_TICKET)
+        or not state.deployment_ticket_key
+    ):
         console.print("\n[bold]Step 6: Create deployment ticket[/bold]")
 
         deployment_payload = build_deployment_ticket_payload(
@@ -483,14 +575,19 @@ def _run_workflow(
                     result = jira.create_issue(deployment_payload)
                     state.deployment_ticket_key = result["key"]
                     state.deployment_ticket_id = result["id"]
+                    state.save()  # 立即儲存！API 回傳後第一時間儲存
                     break
                 except Exception as e:
                     last_error = e
                     if attempt < max_retries:
                         console.print(f"  [yellow]Attempt {attempt} failed, retrying...[/yellow]")
                     else:
-                        console.print(f"  [red]Failed to create deployment ticket after {max_retries} attempts[/red]")
-                        console.print(f"  [yellow]Promote ticket kept open: {format_jira_url(state.promote_ticket_key)}[/yellow]")
+                        console.print(
+                            f"  [red]Failed to create deployment ticket after {max_retries} attempts[/red]"
+                        )
+                        console.print(
+                            f"  [yellow]Promote ticket kept open: {format_jira_url(state.promote_ticket_key)}[/yellow]"
+                        )
                         raise last_error
 
         console.print(f"  Deployment ticket: {format_jira_url(state.deployment_ticket_key)}")
@@ -525,7 +622,9 @@ def _run_workflow(
         console.print("\n[bold]Step 7: Close promote ticket[/bold]")
 
         if dry_run:
-            console.print(f"  [dim]Would transition {state.promote_ticket_key} using Resolve Issue[/dim]")
+            console.print(
+                f"  [dim]Would transition {state.promote_ticket_key} using Resolve Issue[/dim]"
+            )
         else:
             jira = JiraClient()
 
@@ -561,8 +660,12 @@ def _run_workflow(
                         fields=transition_fields,
                     )
             except Exception as e:
-                console.print(f"[yellow]Warning: Could not check/close promote ticket: {e}[/yellow]")
-                console.print(f"[yellow]You may need to close {state.promote_ticket_key} manually[/yellow]")
+                console.print(
+                    f"[yellow]Warning: Could not check/close promote ticket: {e}[/yellow]"
+                )
+                console.print(
+                    f"[yellow]You may need to close {state.promote_ticket_key} manually[/yellow]"
+                )
 
         state.mark_step(RunStep.CLOSED_PROMOTE_TICKET)
         if maybe_stop(RunStep.CLOSED_PROMOTE_TICKET):
@@ -594,8 +697,14 @@ def _print_summary(state: RunState, dry_run: bool = False) -> None:
     table.add_row("Build Version", state.build_version)
     table.add_row("Rollback Version", state.rollback_version)
     table.add_row("", "")
-    table.add_row("Promote Ticket", format_jira_url(state.promote_ticket_key) if state.promote_ticket_key else "N/A")
-    table.add_row("Deployment Ticket", format_jira_url(state.deployment_ticket_key) if state.deployment_ticket_key else "N/A")
+    table.add_row(
+        "Promote Ticket",
+        format_jira_url(state.promote_ticket_key) if state.promote_ticket_key else "N/A",
+    )
+    table.add_row(
+        "Deployment Ticket",
+        format_jira_url(state.deployment_ticket_key) if state.deployment_ticket_key else "N/A",
+    )
     table.add_row("Jenkins Job", state.jenkins_job_url or "N/A")
     table.add_row("", "")
     table.add_row("Jira IDs", ", ".join(state.jira_ids) if state.jira_ids else "N/A")
@@ -640,7 +749,9 @@ def validate() -> None:
     if all_valid:
         console.print("\n[bold green]✓ All credentials valid![/bold green]")
     else:
-        console.print("\n[bold red]✗ Some credentials are invalid. Please check your .env file.[/bold red]")
+        console.print(
+            "\n[bold red]✗ Some credentials are invalid. Please check your .env file.[/bold red]"
+        )
         sys.exit(1)
 
 
