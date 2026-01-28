@@ -131,6 +131,14 @@ Resume later:
 poetry run create-release-ticket run --resume
 ```
 
+If GitHub workflow was run manually and you want to continue without re-triggering:
+
+```bash
+poetry run create-release-ticket run \
+  --resume \
+  --github-run-id 12345678901
+```
+
 If Jenkins was run manually and you want to continue without re-triggering Jenkins:
 
 ```bash
