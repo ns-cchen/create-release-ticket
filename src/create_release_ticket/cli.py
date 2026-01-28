@@ -6,7 +6,7 @@ import json
 import re
 import signal
 import sys
-from datetime import UTC
+from datetime import UTC, datetime
 from typing import Any
 
 import click
@@ -445,8 +445,6 @@ def _run_workflow(
                     console.print(f"    {k}: {v}")
                 state.github_workflow_run_id = 0  # Placeholder for dry run
             else:
-                from datetime import datetime
-
                 # Trigger the workflow
                 workflow_file = config.github.workflow_file
                 triggered_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
