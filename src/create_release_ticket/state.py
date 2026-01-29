@@ -82,14 +82,18 @@ class RunState:
             data["current_step"] = RunStep(data["current_step"])
         return cls(**data)
 
-    def save(self, path: Path = STATE_FILE) -> None:
+    def save(self, path: Path | None = None) -> None:
         """Save state to file."""
+        if path is None:
+            path = STATE_FILE
         with open(path, "w") as f:
             json.dump(self.to_dict(), f, indent=2)
 
     @classmethod
-    def load(cls, path: Path = STATE_FILE) -> RunState | None:
+    def load(cls, path: Path | None = None) -> RunState | None:
         """Load state from file."""
+        if path is None:
+            path = STATE_FILE
         if not path.exists():
             return None
         try:
@@ -101,8 +105,10 @@ class RunState:
             return None
 
     @classmethod
-    def clear(cls, path: Path = STATE_FILE) -> None:
+    def clear(cls, path: Path | None = None) -> None:
         """Delete state file."""
+        if path is None:
+            path = STATE_FILE
         if path.exists():
             path.unlink()
             console.print("[green]✓ Cleared state file[/green]")

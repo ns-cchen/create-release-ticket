@@ -20,6 +20,7 @@ pyyaml = "^6.0.1"
 pytest = "^8.0.0"
 pytest-asyncio = "^0.23.0"
 ruff = "^0.2.0"
+pytest-cov = "^7.0.0"
 
 [tool.poetry.scripts]
 create-release-ticket = "create_release_ticket.cli:main"
