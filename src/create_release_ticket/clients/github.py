@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import time
+from contextlib import nullcontext
 from typing import Any
 
 from rich.console import Console
@@ -12,6 +15,11 @@ from create_release_ticket.clients.base import BaseClient
 from create_release_ticket.config import get_app_config, get_settings
 
 console = Console()
+
+
+def _is_interactive() -> bool:
+    """Check if running in an interactive terminal."""
+    return sys.stdout.isatty() and os.environ.get("TERM") is not None
 
 
 class GitHubClient(BaseClient):
@@ -215,23 +223,34 @@ class GitHubClient(BaseClient):
         max_polls = (timeout_minutes * 60) // poll_interval
         html_url = f"https://github.com/{self.owner}/{self.repo}/actions/runs/{run_id}"
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            TimeElapsedColumn(),
-            console=console,
-        ) as progress:
-            task = progress.add_task("[cyan]Waiting for workflow run...", total=None)
+        # Use Progress only in interactive terminals to avoid "Only one live display" error
+        use_progress = _is_interactive()
+        progress_ctx = (
+            Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                TimeElapsedColumn(),
+                console=console,
+            )
+            if use_progress
+            else nullcontext()
+        )
 
-            for _ in range(max_polls):
+        with progress_ctx as progress:
+            task = None
+            if use_progress and progress:
+                task = progress.add_task("[cyan]Waiting for workflow run...", total=None)
+
+            for poll_num in range(max_polls):
                 run_data = self.get_workflow_run(run_id)
                 status = run_data.get("status")
                 conclusion = run_data.get("conclusion")
 
-                progress.update(
-                    task,
-                    description=f"[cyan]Workflow status: {status} | {html_url}",
-                )
+                if use_progress and progress and task is not None:
+                    progress.update(
+                        task,
+                        description=f"[cyan]Workflow status: {status} | {html_url}",
+                    )
 
                 if status == "completed":
                     if conclusion == "success":

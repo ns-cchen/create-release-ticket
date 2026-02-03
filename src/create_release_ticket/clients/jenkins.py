@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import time
+from contextlib import nullcontext
 from typing import Any
 
 from rich.console import Console
@@ -12,6 +15,11 @@ from create_release_ticket.clients.base import BaseClient
 from create_release_ticket.config import get_app_config, get_settings
 
 console = Console()
+
+
+def _is_interactive() -> bool:
+    """Check if running in an interactive terminal."""
+    return sys.stdout.isatty() and os.environ.get("TERM") is not None
 
 
 class JenkinsClient(BaseClient):
@@ -189,13 +197,23 @@ class JenkinsClient(BaseClient):
 
         max_polls = (timeout_minutes * 60) // poll_interval
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            TimeElapsedColumn(),
-            console=console,
-        ) as progress:
-            task = progress.add_task("[cyan]Waiting in Jenkins queue...", total=None)
+        # Use Progress only in interactive terminals to avoid "Only one live display" error
+        use_progress = _is_interactive()
+        progress_ctx = (
+            Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                TimeElapsedColumn(),
+                console=console,
+            )
+            if use_progress
+            else nullcontext()
+        )
+
+        with progress_ctx as progress:
+            task = None
+            if use_progress and progress:
+                task = progress.add_task("[cyan]Waiting in Jenkins queue...", total=None)
 
             for _ in range(max_polls):
                 try:
@@ -213,11 +231,12 @@ class JenkinsClient(BaseClient):
                     elif queue_item.get("cancelled"):
                         raise Exception("Build was cancelled in queue")
                     else:
-                        why = queue_item.get("why", "Waiting...")
-                        progress.update(
-                            task,
-                            description=f"[cyan]In queue: {why[:60]}...",
-                        )
+                        if use_progress and progress and task is not None:
+                            why = queue_item.get("why", "Waiting...")
+                            progress.update(
+                                task,
+                                description=f"[cyan]In queue: {why[:60]}...",
+                            )
                 except Exception as e:
                     if "Failed to get queue item" not in str(e):
                         raise
@@ -289,16 +308,26 @@ class JenkinsClient(BaseClient):
         max_polls = (timeout_minutes * 60) // poll_interval
         job_url = f"{self.base_job_url}/{build_number}/"
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            TimeElapsedColumn(),
-            console=console,
-        ) as progress:
-            task = progress.add_task(
-                f"[cyan]Resuming poll for build #{build_number}...",
-                total=None,
+        # Use Progress only in interactive terminals to avoid "Only one live display" error
+        use_progress = _is_interactive()
+        progress_ctx = (
+            Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                TimeElapsedColumn(),
+                console=console,
             )
+            if use_progress
+            else nullcontext()
+        )
+
+        with progress_ctx as progress:
+            task = None
+            if use_progress and progress:
+                task = progress.add_task(
+                    f"[cyan]Resuming poll for build #{build_number}...",
+                    total=None,
+                )
 
             for _ in range(max_polls):
                 build_data = self.get_build(build_number)
@@ -323,20 +352,21 @@ class JenkinsClient(BaseClient):
                             f"See: {job_url}"
                         )
 
-                # Still building
-                duration_ms = build_data.get("duration", 0)
-                estimated_ms = build_data.get("estimatedDuration", 0)
-                if estimated_ms > 0:
-                    pct = min(100, int(duration_ms / estimated_ms * 100))
-                    progress.update(
-                        task,
-                        description=f"[cyan]Build #{build_number} running ({pct}%) | {job_url}",
-                    )
-                else:
-                    progress.update(
-                        task,
-                        description=f"[cyan]Build #{build_number} running... | {job_url}",
-                    )
+                # Still building - update progress if interactive
+                if use_progress and progress and task is not None:
+                    duration_ms = build_data.get("duration", 0)
+                    estimated_ms = build_data.get("estimatedDuration", 0)
+                    if estimated_ms > 0:
+                        pct = min(100, int(duration_ms / estimated_ms * 100))
+                        progress.update(
+                            task,
+                            description=f"[cyan]Build #{build_number} running ({pct}%) | {job_url}",
+                        )
+                    else:
+                        progress.update(
+                            task,
+                            description=f"[cyan]Build #{build_number} running... | {job_url}",
+                        )
 
                 time.sleep(poll_interval)
 
