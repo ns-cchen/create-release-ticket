@@ -51,13 +51,14 @@ def mock_ws():
 @pytest.fixture
 def workflow_service(releases_dir, mock_ws):
     """Create WorkflowService with patched dirs and ws_manager."""
-    with (
-        patch("backend.services.workflow_service.RELEASES_DIR", releases_dir),
-        patch("backend.services.workflow_service.ws_manager", mock_ws),
-    ):
-        from backend.services.workflow_service import WorkflowService
+    # Import the module first to ensure it's loaded
+    import backend.services.workflow_service as ws_module
 
-        svc = WorkflowService()
+    with (
+        patch.object(ws_module, "RELEASES_DIR", releases_dir),
+        patch.object(ws_module, "ws_manager", mock_ws),
+    ):
+        svc = ws_module.WorkflowService()
         yield svc
 
 
@@ -118,8 +119,14 @@ class TestFullWorkflowE2E:
         assert fake_jira.call_count("create_issue") == 2  # promote + deployment
         assert fake_jira.call_count("get_issue") == 1  # step 7 checks status
         assert fake_github.call_count("compare_commits") == 1
-        assert fake_github.call_count("trigger_and_wait_workflow") == 1
-        assert fake_jenkins.call_count("trigger_and_wait") == 1
+        # GitHub workflow is now split into trigger + poll phases
+        assert fake_github.call_count("trigger_workflow") == 1
+        assert fake_github.call_count("get_latest_workflow_run") == 1
+        assert fake_github.call_count("poll_workflow_run") == 1
+        # Jenkins build is now split into trigger + wait_for_start + poll phases
+        assert fake_jenkins.call_count("trigger_build") == 1
+        assert fake_jenkins.call_count("wait_for_build_start") == 1
+        assert fake_jenkins.call_count("poll_build_by_number") == 1
 
         # Verify WebSocket notifications were sent
         assert mock_ws.send_step_start.call_count == 7
@@ -280,8 +287,8 @@ class TestInterruptResumeE2E:
             started_at="2026-01-29T10:00:00",
         )
 
-        # First run: GitHub will fail
-        fake_github.fail_on = "trigger_and_wait_workflow"
+        # First run: GitHub will fail (now fails on trigger_workflow since split)
+        fake_github.fail_on = "trigger_workflow"
 
         # The workflow should catch the error and set error state
         await workflow_service._run_workflow(
@@ -340,8 +347,8 @@ class TestInterruptResumeE2E:
             started_at="2026-01-29T10:00:00",
         )
 
-        # First run: Jenkins will fail
-        fake_jenkins.fail_on = "trigger_and_wait"
+        # First run: Jenkins will fail (now fails on trigger_build since split)
+        fake_jenkins.fail_on = "trigger_build"
 
         await workflow_service._run_workflow(
             release_id=release_id,
@@ -533,8 +540,12 @@ class TestResumeFromEveryStep:
 
         # Steps 3-7 all ran
         assert fake_jira.call_count("create_issue") == 2  # promote + deployment
-        assert fake_github.call_count("trigger_and_wait_workflow") == 1
-        assert fake_jenkins.call_count("trigger_and_wait") == 1
+        # GitHub workflow is now split into trigger + poll phases
+        assert fake_github.call_count("trigger_workflow") == 1
+        assert fake_github.call_count("poll_workflow_run") == 1
+        # Jenkins build is now split into trigger + poll phases
+        assert fake_jenkins.call_count("trigger_build") == 1
+        assert fake_jenkins.call_count("poll_build_by_number") == 1
 
     async def test_resume_from_step4_skips_github_runs_jenkins(
         self, workflow_service, releases_dir, mock_ws,
@@ -567,11 +578,13 @@ class TestResumeFromEveryStep:
         assert state.current_step == RunStep.COMPLETED
 
         # GitHub NOT re-triggered, commits NOT re-fetched
-        assert fake_github.call_count("trigger_and_wait_workflow") == 0
+        assert fake_github.call_count("trigger_workflow") == 0
+        assert fake_github.call_count("poll_workflow_run") == 0
         assert fake_github.call_count("compare_commits") == 0
 
-        # Jenkins DID run
-        assert fake_jenkins.call_count("trigger_and_wait") == 1
+        # Jenkins DID run (split phases)
+        assert fake_jenkins.call_count("trigger_build") == 1
+        assert fake_jenkins.call_count("poll_build_by_number") == 1
         assert state.jenkins_build_number is not None
 
         # Deployment ticket created, promote closed
@@ -723,9 +736,11 @@ class TestStopAfterThenResume:
         # Only 1 additional create_issue (deployment ticket in step 6)
         assert fake_jira.call_count("create_issue") - jira_creates_phase1 == 1
 
-        # Steps 4-7 ran in phase 2
-        assert fake_github.call_count("trigger_and_wait_workflow") == 1
-        assert fake_jenkins.call_count("trigger_and_wait") == 1
+        # Steps 4-7 ran in phase 2 (split phases)
+        assert fake_github.call_count("trigger_workflow") == 1
+        assert fake_github.call_count("poll_workflow_run") == 1
+        assert fake_jenkins.call_count("trigger_build") == 1
+        assert fake_jenkins.call_count("poll_build_by_number") == 1
 
     async def test_stop_after_step5_then_resume(
         self, workflow_service, releases_dir, mock_ws,
@@ -754,7 +769,8 @@ class TestStopAfterThenResume:
         assert state.jenkins_build_number is not None
         assert state.deployment_ticket_key is None  # Step 6 didn't run
 
-        jenkins_calls = fake_jenkins.call_count("trigger_and_wait")
+        jenkins_trigger_calls = fake_jenkins.call_count("trigger_build")
+        jenkins_poll_calls = fake_jenkins.call_count("poll_build_by_number")
 
         # Phase 2: Resume for steps 6-7
         await workflow_service._run_workflow(
@@ -769,8 +785,9 @@ class TestStopAfterThenResume:
         assert state.current_step == RunStep.COMPLETED
         assert state.deployment_ticket_key is not None
 
-        # Jenkins NOT re-triggered
-        assert fake_jenkins.call_count("trigger_and_wait") == jenkins_calls
+        # Jenkins NOT re-triggered (split phases)
+        assert fake_jenkins.call_count("trigger_build") == jenkins_trigger_calls
+        assert fake_jenkins.call_count("poll_build_by_number") == jenkins_poll_calls
 
 
 # ── Multiple sequential failures ─────────────────────────────────────────
@@ -789,8 +806,8 @@ class TestMultipleFailures:
             started_at="2026-01-29T10:00:00",
         )
 
-        # Run 1: GitHub fails at step 4
-        fake_github.fail_on = "trigger_and_wait_workflow"
+        # Run 1: GitHub fails at step 4 (trigger_workflow since split)
+        fake_github.fail_on = "trigger_workflow"
 
         await workflow_service._run_workflow(
             release_id=release_id,
@@ -805,9 +822,9 @@ class TestMultipleFailures:
         assert state.promote_ticket_key is not None
         promote_key = state.promote_ticket_key
 
-        # Run 2: Fix GitHub, but now Jenkins fails
+        # Run 2: Fix GitHub, but now Jenkins fails (trigger_build since split)
         fake_github.fail_on = None
-        fake_jenkins.fail_on = "trigger_and_wait"
+        fake_jenkins.fail_on = "trigger_build"
         state.error_message = None
         state.error_step = None
 

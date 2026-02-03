@@ -15,6 +15,9 @@ pydantic-settings = "^2.2.0"
 python-dotenv = "^1.0.1"
 rich = "^13.7.0"
 pyyaml = "^6.0.1"
+fastapi = "^0.128.0"
+uvicorn = {extras = ["standard"], version = "^0.40.0"}
+websockets = "^16.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
@@ -28,6 +31,10 @@ create-release-ticket = "create_release_ticket.cli:main"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "strict"
 
 [tool.ruff]
 line-length = 100
