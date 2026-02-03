@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from create_release_ticket.config import get_app_config
@@ -65,7 +65,7 @@ def build_deployment_ticket_payload(
     def parse_tz_offset(value: str) -> datetime.tzinfo:
         v = value.strip()
         if v.upper() == "Z":
-            return datetime.UTC
+            return timezone.utc
 
         # Accept "+08:00", "+0800", "-07:00", "-0700"
         if len(v) == 5 and (v[0] in "+-") and v[1:].isdigit():

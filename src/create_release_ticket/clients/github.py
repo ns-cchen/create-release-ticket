@@ -265,12 +265,12 @@ class GitHubClient(BaseClient):
         Returns:
             Final workflow run data
         """
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         workflow_file = self.github_config.workflow_file
 
         # Capture timestamp before triggering to filter out stale runs
-        triggered_at = datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        triggered_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Trigger the workflow
         self.trigger_workflow(workflow_file, ref, inputs)
