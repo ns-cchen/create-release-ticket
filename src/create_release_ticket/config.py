@@ -20,7 +20,7 @@ class JiraConfig(BaseModel):
     deployment_issue_type_id: str = "10940"
     component_id: str = "13002"
     component_name: str = "Query Service (QS)"
-    user_id: str = "712020:eedcb6b5-b34f-4247-a4a6-da3203c1fc7d"
+    user_id: str = ""  # Set via JIRA_USER_ID env var
     done_transition_id: str = "761"
 
 
@@ -30,7 +30,7 @@ class GitHubConfig(BaseModel):
     owner: str = "netSkope"
     repo: str = "query-engine"
     workflow_file: str = "ep-falcon-distribution.yml"
-    notify_emails: str = "bgururajan@netskope.com rsindhu@netskope.com"
+    notify_emails: str = ""  # Set via GITHUB_NOTIFY_EMAILS env var (optional)
     destinations: str = "commercial:pre-prod commercial:prod"
     manifest_service: str = "queryservice"
 
@@ -48,6 +48,7 @@ class JenkinsConfig(BaseModel):
     pdv_config_image_tag: str = "2.0.121"
     poll_interval_seconds: int = 30
     timeout_minutes: int = 60
+    max_consecutive_poll_failures: int = 5
 
 
 class RetryConfig(BaseModel):
@@ -79,17 +80,18 @@ class Settings(BaseSettings):
     # Jira credentials
     jira_email: str = Field(..., description="Jira email address")
     jira_api_token: str = Field(..., description="Jira API token")
+    jira_user_id: str = Field(..., description="Jira account ID (from /rest/api/3/myself)")
 
     # GitHub credentials
     github_pat: str = Field(..., description="GitHub Personal Access Token")
 
     # Jenkins credentials
-    jenkins_url: str = Field(
-        default="https://cdjenkins.betaskope.iad0.netskope.com",
-        description="Jenkins base URL",
-    )
+    jenkins_url: str = Field(..., description="Jenkins base URL")
     jenkins_user: str = Field(..., description="Jenkins username")
     jenkins_api_token: str = Field(..., description="Jenkins API token")
+
+    # Optional overrides
+    github_notify_emails: str = Field(default="", description="Space-separated notification emails")
 
 
 def load_app_config(config_path: Path | None = None) -> AppConfig:
@@ -121,5 +123,24 @@ def get_settings() -> Settings:
 
 @lru_cache
 def get_app_config() -> AppConfig:
-    """Get cached app config instance."""
-    return load_app_config()
+    """Get cached app config instance, with personal env overrides applied."""
+    config = load_app_config()
+    settings = get_settings()
+
+    jira_override: dict[str, Any] = {}
+    if settings.jira_user_id:
+        jira_override["user_id"] = settings.jira_user_id
+
+    github_override: dict[str, Any] = {}
+    if settings.github_notify_emails:
+        github_override["notify_emails"] = settings.github_notify_emails
+
+    if not jira_override and not github_override:
+        return config
+
+    return config.model_copy(
+        update={
+            "jira": config.jira.model_copy(update=jira_override),
+            "github": config.github.model_copy(update=github_override),
+        }
+    )

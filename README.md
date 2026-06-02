@@ -1,226 +1,203 @@
 # Create Release Ticket
 
-CLI tool to automate QueryService deployment workflow.
+CLI tool (with optional web UI) to automate the QueryService deployment workflow.
 
-## Features
+## What it does
 
-- **Automated Ticket Creation**: Creates promote and deployment tickets in Jira
-- **GitHub Workflow Integration**: Triggers build promotion workflow
-- **Jenkins Integration**: Triggers devint deployment and waits for completion
-- **Auto-detect Jira IDs**: Extracts ticket numbers from commit messages
-- **Resume Support**: Can resume interrupted runs
-- **Cleanup on Error**: Offers to clean up created resources on failure
-- **Dry Run Mode**: Preview all actions before executing
+Automates 7 steps end-to-end:
 
-## Installation
+| Step | Action |
+|------|--------|
+| 1 | Parse build version → derive branch names |
+| 2 | Fetch commits between branches → extract Jira ticket IDs |
+| 3 | Create promote ticket in Jira |
+| 4 | Trigger GitHub promotion workflow → wait for completion (~10 min) |
+| 5 | Trigger Jenkins devint deployment → wait for completion (~42 min) |
+| 6 | Create deployment ticket in Jira |
+| 7 | Close the promote ticket |
 
-### Prerequisites
+The workflow is resumable — if interrupted at any step, run with `--resume` to pick up where it left off.
+
+## Prerequisites
 
 - Python 3.12+
 - [mise](https://mise.jdx.dev/) for version management
-- Poetry for dependency management
+- Poetry (installed via mise)
+- Node.js 22 (only required for the web UI)
 
-### Setup
+## Setup
 
-1. Clone the repository and navigate to the directory:
-
-  ```bash
-  cd create-release-ticket
-  ```
-
-1. Install mise and activate:
-
-  ```bash
-  mise install
-  mise activate
-  ```
-
-1. Install dependencies:
-
-  ```bash
-  poetry install
-  ```
-
-1. Copy and configure environment variables:
-
-  ```bash
-  cp .env.example .env
-  # Edit .env with your credentials
-  ```
-
-1. (Optional) Customize configuration:
-
-  ```bash
-  # Edit config.yaml to change default values
-  ```
-
-## Configuration
-
-### Environment Variables (.env)
+### 1. Clone and install
 
 ```bash
-# Jira
-JIRA_EMAIL=your-email@netskope.com
-JIRA_API_TOKEN=your-jira-api-token
-
-# GitHub
-GITHUB_PAT=ghp_your-github-personal-access-token
-
-# Jenkins
-JENKINS_URL=https://cdjenkins.betaskope.iad0.netskope.com
-JENKINS_USER=your-jenkins-username
-JENKINS_API_TOKEN=your-jenkins-api-token
+git clone https://github.com/ns-cchen/create-release-ticket.git
+cd create-release-ticket
+mise install
+poetry install
 ```
 
-### Application Config (config.yaml)
+### 2. Configure credentials
 
-Customize default values for:
+```bash
+cp .env.example .env
+# Edit .env with your credentials
+```
 
-- Jira project/component IDs
-- GitHub workflow settings
-- Jenkins job parameters
-- Retry settings
+### Required credentials
 
-## Usage
+| Variable | Description | How to get it |
+|----------|-------------|---------------|
+| `JIRA_EMAIL` | Your Atlassian account email | Your login email |
+| `JIRA_API_TOKEN` | Jira API token | [Atlassian account settings → Security → API tokens](https://id.atlassian.com/manage-profile/security/api-tokens) |
+| `JIRA_USER_ID` | Your Jira account ID | See below |
+| `GITHUB_PAT` | GitHub Personal Access Token | [GitHub → Settings → Developer settings → Personal access tokens](https://github.com/settings/tokens) — needs `repo` + `workflow` scopes |
+| `JENKINS_URL` | Jenkins base URL | Ask your team |
+| `JENKINS_USER` | Jenkins username | Usually your email address |
+| `JENKINS_API_TOKEN` | Jenkins API token | Jenkins → top-right profile → Configure → API Token → Add new Token |
 
-### Quickstart
+#### How to find your Jira User ID
 
-Validate credentials:
+Open this URL while logged in to Jira:
+
+```
+https://<your-jira-domain>/rest/api/3/myself
+```
+
+Copy the `accountId` value from the JSON response.
+
+### 3. Validate credentials
 
 ```bash
 poetry run create-release-ticket validate
 ```
 
-Run the full workflow (recommended, verbose):
+All three services (Jira, GitHub, Jenkins) should show ✓ before proceeding.
+
+## CLI Usage
+
+### Run the full workflow
 
 ```bash
 poetry run create-release-ticket run \
-  --build-version queryservice-release-YYYY.MM.W.P.DRONE \
-  --rollback-version queryservice-release-YYYY.MM.W.P.DRONE \
-  --previous-branch queryservice-release-YYYY.MM.W \
-  --ref queryservice-release-YYYY.MM.W \
-  --previous-deployment-ticket ENG-857076 \
-  -v
+  --build-version queryservice-release-2025.12.2.0.18496 \
+  --rollback-version queryservice-release-2025.12.1.0.18438
 ```
 
-### Dry Run (No Side Effects)
-
-```bash
-poetry run create-release-ticket run \
-  --build-version queryservice-release-YYYY.MM.W.P.DRONE \
-  --rollback-version queryservice-release-YYYY.MM.W.P.DRONE \
-  --dry-run
-```
-
-### Resume / Staged Run
-
-Stop after GitHub (so you can review before Jenkins):
-
-```bash
-poetry run create-release-ticket run \
-  --build-version queryservice-release-YYYY.MM.W.P.DRONE \
-  --rollback-version queryservice-release-YYYY.MM.W.P.DRONE \
-  --previous-branch queryservice-release-YYYY.MM.W \
-  --ref queryservice-release-YYYY.MM.W \
-  --stop-after github
-```
-
-Resume later:
+### Resume an interrupted run
 
 ```bash
 poetry run create-release-ticket run --resume
 ```
 
-If GitHub workflow was run manually and you want to continue without re-triggering:
+### Dry run (preview without executing)
+
+```bash
+poetry run create-release-ticket run --dry-run \
+  --build-version queryservice-release-2025.12.2.0.18496 \
+  --rollback-version queryservice-release-2025.12.1.0.18438
+```
+
+### Stop after a specific step
+
+Useful for staged deployments or testing individual steps:
+
+```bash
+# Stop after GitHub workflow completes (before Jenkins)
+poetry run create-release-ticket run --stop-after github ...
+
+# Stop after Jenkins (before creating deployment ticket)
+poetry run create-release-ticket run --stop-after jenkins ...
+```
+
+### Use an existing build (skip triggering)
+
+If Jenkins or the GitHub workflow was already triggered manually:
 
 ```bash
 poetry run create-release-ticket run \
-  --resume \
-  --github-run-id 12345678901
+  --jenkins-build-number 1234 \
+  --jenkins-job-url https://jenkins.example.com/job/my-job/1234/ \
+  ...
 ```
 
-If Jenkins was run manually and you want to continue without re-triggering Jenkins:
+### All options
 
-```bash
-poetry run create-release-ticket run \
-  --resume \
-  --jenkins-build-number 1729 \
-  --jenkins-job-url https://cdjenkins.betaskope.iad0.netskope.com/job/one_button_queryservice/1729/
+```
+Options:
+  -b, --build-version TEXT             Build version (queryservice-release-YYYY.MM.W.P.DRONE)
+  -r, --rollback-version TEXT          Rollback version
+  --ref TEXT                           Git ref for GitHub workflow (default: develop)
+  --previous-branch TEXT               Override previous branch for commit comparison
+  --jira-ids TEXT                      Comma-separated Jira IDs (override auto-detection)
+  --previous-deployment-ticket TEXT    Previous deployment ticket to relate to (e.g. ENG-857076)
+  --dry-run                            Preview all actions without executing
+  --stop-after TEXT                    Stop after step: 1-7, or keyword (github/jenkins/deploy)
+  --jenkins-build-number INTEGER       Use existing Jenkins build number
+  --jenkins-job-url TEXT               Use existing Jenkins job URL
+  --github-run-id INTEGER              Use existing GitHub workflow run ID
+  --resume                             Resume from last interrupted run
+  -v, --verbose                        Enable verbose logging
+  --version                            Show version and exit
+  --help                               Show this message and exit
 ```
 
-### Overrides
+### Other commands
 
 ```bash
-# Override Jira IDs (skip auto-detection)
-poetry run create-release-ticket run \
-  --build-version queryservice-release-YYYY.MM.W.P.DRONE \
-  --rollback-version queryservice-release-YYYY.MM.W.P.DRONE \
-  --jira-ids "DINT-1234,EP-5678,ENG-9999"
-```
-
-### Cleanup / Utilities
-
-```bash
-poetry run create-release-ticket cleanup
+# Show current workflow state
 poetry run create-release-ticket show-state
+
+# Clean up resources from a failed run (closes tickets, cancels builds)
+poetry run create-release-ticket cleanup
+
+# Manually close a Jira ticket
+poetry run create-release-ticket close-ticket ENG-123456
 ```
 
-Close a ticket (Resolve Issue). ENG workflow may require extra required fields:
+## Web UI
+
+The web UI provides a browser-based dashboard for managing releases.
+
+### Start the UI
 
 ```bash
-poetry run create-release-ticket close-ticket ENG-123456 --fix-version 202601.4 --sub-component queryservice
+make install   # first time only — installs frontend dependencies
+make dev
 ```
 
-## Workflow Steps
+- Backend: http://localhost:5004
+- Frontend: http://localhost:3005
 
-The tool executes the following steps:
+The web UI reads the same `.env` credentials. All workflow operations are available through the browser.
 
-1. **Parse Version** - Extract branch info from build version
-2. **Fetch Commits** - Compare branches and extract Jira IDs from commit messages
-3. **Create Promote Ticket** - Create Jira ticket for build promotion
-4. **Trigger GitHub Workflow** - Dispatch promote workflow and wait (~10 min)
-5. **Trigger Jenkins** - Start devint deployment and wait (~42 min)
-6. **Create Deployment Ticket** - Create Jira deployment ticket with all info
-7. **Close Promote Ticket** - Transition promote ticket via Resolve Issue (Resolution=Fixed)
-
-## Error Handling
-
-On error, the CLI will prompt:
-
-- **c** - Clean up (close tickets, cancel Jenkins)
-- **k** - Keep resources and exit
-- **r** - Retry from last step
-
-On Ctrl+C interrupt:
-
-- **c** - Clean up
-- **k** - Keep resources
-
-## Logs
-
-Logs are saved to `./logs/YYYY-MM-DD_HHMMSS.log`
-
-## Development
+### Individual servers
 
 ```bash
-# Run linting
-poetry run ruff check src/
-
-# Run tests
-poetry run pytest
-
-# Format code
-poetry run ruff format src/
+make dev-backend    # backend only
+make dev-frontend   # frontend only
 ```
 
-## Version Format
+## Configuration
 
-Build version format: `queryservice-release-YYYY.MM.W.P.DRONE`
+`config.yaml` contains team-wide settings (Jira project IDs, Jenkins job parameters, GitHub repo).
+Personal settings go in `.env` and are never committed:
 
-- `YYYY` - Year
-- `MM` - Month
-- `W` - Week of month (1-4)
-- `P` - Patch number
-- `DRONE` - Drone build number
+| Env var | Required | Purpose |
+|---------|----------|---------|
+| `JIRA_USER_ID` | Yes | Your personal Jira account ID |
+| `JENKINS_URL` | Yes | Jenkins base URL |
+| `GITHUB_NOTIFY_EMAILS` | No | Space-separated emails for workflow notifications |
 
-Example: `queryservice-release-2025.12.2.0.18496`
+`config.yaml` values are shared defaults. Override any field there for your local environment.
+
+## Version format
+
+Build versions follow this pattern:
+
+```
+queryservice-release-YYYY.MM.W.P.DRONE
+```
+
+Example: `queryservice-release-2026.1.5.0.18914`
+
+The previous branch is auto-calculated by decrementing the week number (handles month/year boundaries automatically).

@@ -110,17 +110,20 @@ class JenkinsClientProtocol(Protocol):
         ticket: str,
         extra_params: dict[str, str] | None = None,
     ) -> dict[str, Any]: ...
+    def get_queue_item(self, queue_url: str) -> dict[str, Any]: ...
     def wait_for_build_start(
         self,
         queue_url: str,
         poll_interval: int | None = None,
         timeout_minutes: int = 10,
+        max_consecutive_poll_failures: int | None = None,
     ) -> dict[str, Any]: ...
     def poll_build_by_number(
         self,
         build_number: int,
         poll_interval: int | None = None,
         timeout_minutes: int | None = None,
+        max_consecutive_poll_failures: int | None = None,
     ) -> dict[str, Any]: ...
     def trigger_and_wait(
         self,
@@ -148,11 +151,22 @@ STEPS = [
     (7, "Close Promote Ticket", RunStep.CLOSED_PROMOTE_TICKET),
 ]
 
+# Map start_from_step to the RunStep that should be "already completed"
+# so the workflow begins at the right place.
+# Only steps {1, 4, 5, 6} are valid start points.
+STEP_TO_RUNSTEP = {
+    1: RunStep.NOT_STARTED,
+    4: RunStep.CREATED_PROMOTE_TICKET,
+    5: RunStep.GITHUB_WORKFLOW_COMPLETED,
+    6: RunStep.JENKINS_COMPLETED,
+}
+
 
 def _step_number_from_key(key: str) -> int:
     """Get step number from RunStep key.
 
     Maps intermediate states (triggered_*) to their parent step number.
+    Returns 8 for 'completed' state (higher than all steps).
     """
     # Map intermediate states to their parent step
     intermediate_map = {
@@ -161,6 +175,10 @@ def _step_number_from_key(key: str) -> int:
     }
     if key in intermediate_map:
         return intermediate_map[key]
+
+    # 'completed' state means all steps are done, return higher than any step
+    if key == "completed":
+        return 8
 
     for num, _, step in STEPS:
         if step.value == key:
@@ -174,16 +192,6 @@ def _step_name_from_key(key: str) -> str:
         if step.value == key:
             return name
     return key
-
-
-def _stop_after_to_step(stop_after: int | None) -> RunStep | None:
-    """Convert step number to RunStep enum."""
-    if stop_after is None:
-        return None
-    for num, _, step in STEPS:
-        if num == stop_after:
-            return step
-    return None
 
 
 def _get_fake_clients() -> tuple[
@@ -203,10 +211,46 @@ class WorkflowService:
 
     def __init__(self):
         RELEASES_DIR.mkdir(parents=True, exist_ok=True)
+        self._skip_events: dict[str, asyncio.Event] = {}
+
+    def skip_jenkins(self, release_id: str) -> dict[str, Any]:
+        """Signal the workflow to skip Jenkins polling for a release.
+
+        Returns success/failure dict.
+        """
+        state = self._load_release(release_id)
+        if not state:
+            return {"success": False, "message": "Release not found"}
+
+        # Only allow skipping during step 5 polling (build already triggered)
+        raw = self._load_raw_data(release_id) or {}
+        if raw.get("current_step") not in ("triggered_jenkins",):
+            return {"success": False, "message": "Jenkins build is not currently being polled"}
+
+        if not state.jenkins_build_number:
+            return {"success": False, "message": "Jenkins build has not started yet"}
+
+        event = self._skip_events.get(release_id)
+        if event is None:
+            return {"success": False, "message": "No active polling to skip"}
+
+        event.set()
+        return {"success": True, "message": "Jenkins polling skipped — proceeding to next step"}
 
     def _get_release_path(self, release_id: str) -> Path:
         """Get the path to a release state file."""
         return RELEASES_DIR / f"{release_id}.json"
+
+    def _load_raw_data(self, release_id: str) -> dict | None:
+        """Load raw JSON data for a release (without RunState parsing)."""
+        path = self._get_release_path(release_id)
+        if not path.exists():
+            return None
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            return None
 
     def _load_release(self, release_id: str) -> RunState | None:
         """Load a release state from file."""
@@ -217,7 +261,7 @@ class WorkflowService:
             with open(path) as f:
                 data = json.load(f)
             # Filter out extra keys not part of RunState
-            extra_keys = {"_id", "dry_run", "stop_after", "paused"}
+            extra_keys = {"_id", "dry_run", "start_from_step", "stop_after", "paused"}
             state_data = {k: v for k, v in data.items() if k not in extra_keys}
             return RunState.from_dict(state_data)
         except Exception as e:
@@ -243,15 +287,13 @@ class WorkflowService:
         """Convert RunState to ReleaseResponse."""
         extra = extra or {}
 
-        # Determine status
+        # Determine status (no more "paused" — treat legacy paused as in_progress)
         if state.error_message:
             status = "error"
         elif state.current_step == RunStep.COMPLETED:
             status = "completed"
         elif state.current_step == RunStep.NOT_STARTED:
             status = "not_started"
-        elif extra.get("paused"):
-            status = "paused"
         else:
             status = "in_progress"
 
@@ -265,7 +307,17 @@ class WorkflowService:
             if _step_number_from_key(state.current_step.value) > num:
                 step_status = "completed"
             elif _step_number_from_key(state.current_step.value) == num:
-                step_status = "completed" if status != "in_progress" else "in_progress"
+                # The STEPS tuple stores the "completed" RunStep for each step.
+                # If current_step matches it exactly, the step is done (e.g.
+                # GITHUB_WORKFLOW_COMPLETED = step 4 done). Otherwise it's an
+                # intermediate state (e.g. TRIGGERED_GITHUB_WORKFLOW = step 4
+                # still running).
+                if state.current_step == step:
+                    step_status = "completed"
+                elif state.error_message:
+                    step_status = "error"
+                else:
+                    step_status = "in_progress"
 
             # Populate result from state for completed steps (so links persist after refresh)
             step_result = None
@@ -299,6 +351,9 @@ class WorkflowService:
                 result=step_result,
             ))
 
+        # Read start_from_step from extra, with backward compat for old stop_after
+        start_from_step = extra.get("start_from_step", 1)
+
         return ReleaseResponse(
             id=release_id,
             build_version=state.build_version,
@@ -324,13 +379,13 @@ class WorkflowService:
             error_step=state.error_step,
             steps=steps,
             dry_run=extra.get("dry_run", False),
-            stop_after=extra.get("stop_after"),
+            start_from_step=start_from_step,
         )
 
     def list_releases(self) -> list[ReleaseListItem]:
         """List all releases."""
         releases = []
-        extra_keys = {"_id", "dry_run", "stop_after", "paused"}
+        extra_keys = {"_id", "dry_run", "start_from_step", "stop_after", "paused"}
         for path in RELEASES_DIR.glob("*.json"):
             try:
                 with open(path) as f:
@@ -339,15 +394,13 @@ class WorkflowService:
                 state = RunState.from_dict(state_data)
                 release_id = data.get("_id", path.stem)
 
-                # Determine status
+                # Determine status (no more "paused" — treat legacy paused as in_progress)
                 if state.error_message:
                     status = "error"
                 elif state.current_step == RunStep.COMPLETED:
                     status = "completed"
                 elif state.current_step == RunStep.NOT_STARTED:
                     status = "not_started"
-                elif data.get("paused"):
-                    status = "paused"
                 else:
                     status = "in_progress"
 
@@ -381,7 +434,7 @@ class WorkflowService:
         with open(path) as f:
             data = json.load(f)
         # Separate extra fields from RunState fields
-        extra_keys = {"_id", "dry_run", "stop_after", "paused"}
+        extra_keys = {"_id", "dry_run", "start_from_step", "stop_after", "paused"}
         extra = {k: v for k, v in data.items() if k in extra_keys}
         state_data = {k: v for k, v in data.items() if k not in extra_keys}
         state = RunState.from_dict(state_data)
@@ -405,10 +458,29 @@ class WorkflowService:
         if request.jira_ids:
             state.jira_ids = request.jira_ids
 
+        # Pre-populate state from artifacts when start_from_step > 1
+        if request.start_from_step > 1:
+            # Parse version immediately to populate branches
+            parsed = parse_build_version(state.build_version)
+            state.current_branch = parsed.current_branch
+            state.previous_branch = request.previous_branch or parsed.previous_branch
+
+            # Pre-populate provided artifacts
+            if request.promote_ticket_key:
+                state.promote_ticket_key = request.promote_ticket_key
+            if request.github_workflow_run_id:
+                state.github_workflow_run_id = request.github_workflow_run_id
+            if request.jenkins_build_number:
+                state.jenkins_build_number = request.jenkins_build_number
+            if request.jenkins_job_url:
+                state.jenkins_job_url = request.jenkins_job_url
+            # Set current_step based on start_from_step
+            state.current_step = STEP_TO_RUNSTEP[request.start_from_step]
+
         # Save initial state
         extra = {
             "dry_run": request.dry_run,
-            "stop_after": request.stop_after,
+            "start_from_step": request.start_from_step,
             "previous_branch_override": request.previous_branch,
         }
         self._save_release(release_id, state, extra)
@@ -418,9 +490,9 @@ class WorkflowService:
             release_id=release_id,
             state=state,
             dry_run=request.dry_run,
-            stop_after=_stop_after_to_step(request.stop_after),
             previous_branch_override=request.previous_branch,
             jira_ids_override=request.jira_ids,
+            max_consecutive_poll_failures=request.max_consecutive_poll_failures,
         ))
 
         return self._state_to_response(release_id, state, extra)
@@ -430,7 +502,7 @@ class WorkflowService:
         release_id: str,
         request: ReleaseResumeRequest
     ) -> ReleaseResponse | None:
-        """Resume a paused release."""
+        """Resume a release — always runs to completion."""
         path = self._get_release_path(release_id)
         if not path.exists():
             return None
@@ -438,29 +510,40 @@ class WorkflowService:
         with open(path) as f:
             data = json.load(f)
         # Filter out extra keys not part of RunState
-        extra_keys = {"_id", "dry_run", "stop_after", "paused"}
+        extra_keys = {"_id", "dry_run", "start_from_step", "stop_after", "paused"}
         state_data = {k: v for k, v in data.items() if k not in extra_keys}
         state = RunState.from_dict(state_data)
 
+        # Apply GitHub override if provided
+        # Set to TRIGGERED_GITHUB_WORKFLOW so the workflow will poll the run instead of triggering
+        if request.github_workflow_run_id is not None:
+            state.github_workflow_run_id = request.github_workflow_run_id
+            state.current_step = RunStep.TRIGGERED_GITHUB_WORKFLOW
+            state.error_message = None
+            state.error_step = None
+
         # Apply Jenkins override if provided
+        # Set to TRIGGERED_JENKINS so the workflow will poll the build instead of skipping
         if request.jenkins_build_number is not None and request.jenkins_job_url is not None:
             state.jenkins_build_number = request.jenkins_build_number
             state.jenkins_job_url = request.jenkins_job_url
-            state.current_step = RunStep.JENKINS_COMPLETED
+            state.current_step = RunStep.TRIGGERED_JENKINS
+            # Clear error state since we're recovering
+            state.error_message = None
+            state.error_step = None
 
-        # Clear paused flag
-        data["paused"] = False
-        if request.stop_after:
-            data["stop_after"] = request.stop_after
+        # Clear legacy paused flag if present
+        data.pop("paused", None)
+        # Clear legacy stop_after if present
+        data.pop("stop_after", None)
 
         self._save_release(release_id, state, data)
 
-        # Resume workflow in background
+        # Resume workflow in background — always runs to completion
         asyncio.create_task(self._run_workflow(
             release_id=release_id,
             state=state,
             dry_run=data.get("dry_run", False),
-            stop_after=_stop_after_to_step(request.stop_after or data.get("stop_after")),
             previous_branch_override=data.get("previous_branch_override"),
             jira_ids_override=state.jira_ids if state.jira_ids else None,
         ))
@@ -523,9 +606,9 @@ class WorkflowService:
         release_id: str,
         state: RunState,
         dry_run: bool = False,
-        stop_after: RunStep | None = None,
         previous_branch_override: str | None = None,
         jira_ids_override: list[str] | None = None,
+        max_consecutive_poll_failures: int | None = None,
         # DI for testing - if not provided, will be created based on dry_run flag
         jira_client: JiraClientProtocol | None = None,
         github_client: GitHubClientProtocol | None = None,
@@ -533,11 +616,12 @@ class WorkflowService:
     ) -> None:
         """Execute the deployment workflow with WebSocket updates.
 
+        The workflow always runs to completion from the current step.
+
         Args:
             release_id: Unique release identifier
             state: Current workflow state
             dry_run: If True, use fake clients instead of real APIs
-            stop_after: Stop after this step (for staged runs)
             previous_branch_override: Override auto-detected previous branch
             jira_ids_override: Override auto-detected Jira IDs
             jira_client: Optional injected Jira client (for testing)
@@ -562,20 +646,7 @@ class WorkflowService:
         def save_state():
             self._save_release(release_id, state, {
                 "dry_run": dry_run,
-                "stop_after": stop_after.value if stop_after else None,
             })
-
-        async def maybe_stop(after_step: RunStep) -> bool:
-            if stop_after and after_step == stop_after:
-                step_num = _step_number_from_key(after_step.value)
-                await ws_manager.send_workflow_paused(release_id, step_num, after_step.value)
-                self._save_release(release_id, state, {
-                    "dry_run": dry_run,
-                    "stop_after": stop_after.value if stop_after else None,
-                    "paused": True,
-                })
-                return True
-            return False
 
         try:
             # Step 1: Parse version
@@ -594,11 +665,12 @@ class WorkflowService:
                     {"current_branch": state.current_branch, "previous_branch": state.previous_branch}
                 )
 
-                if await maybe_stop(RunStep.PARSED_VERSION):
-                    return
-
             # Step 2: Fetch commits
-            if not state.can_resume_from(RunStep.FETCHED_COMMITS) or not state.jira_ids:
+            # Re-run if we haven't passed this step, or if jira_ids is empty
+            # but only when we're still before step 3 (start_from_step may skip this)
+            if not state.can_resume_from(RunStep.FETCHED_COMMITS) or (
+                not state.jira_ids and not state.can_resume_from(RunStep.CREATED_PROMOTE_TICKET)
+            ):
                 await ws_manager.send_step_start(release_id, 2, "Fetch Commits", "fetched_commits")
 
                 if jira_ids_override:
@@ -631,9 +703,6 @@ class WorkflowService:
                     {"jira_ids": state.jira_ids}
                 )
 
-                if await maybe_stop(RunStep.FETCHED_COMMITS):
-                    return
-
             # Step 3: Create promote ticket
             if not state.can_resume_from(RunStep.CREATED_PROMOTE_TICKET) or not state.promote_ticket_key:
                 await ws_manager.send_step_start(release_id, 3, "Create Promote Ticket", "created_promote_ticket")
@@ -645,6 +714,8 @@ class WorkflowService:
                 result = jira_cli.create_issue(promote_payload)
                 state.promote_ticket_key = result["key"]
                 state.promote_ticket_id = result["id"]
+                save_state()  # Save ticket key immediately to prevent duplicates on resume
+                logger.info(f"Created promote ticket: {state.promote_ticket_key}")
 
                 state.current_step = RunStep.CREATED_PROMOTE_TICKET
                 save_state()
@@ -653,9 +724,6 @@ class WorkflowService:
                     release_id, 3, "Create Promote Ticket", "created_promote_ticket",
                     {"promote_ticket_key": state.promote_ticket_key, "url": format_jira_url(state.promote_ticket_key)}
                 )
-
-                if await maybe_stop(RunStep.CREATED_PROMOTE_TICKET):
-                    return
 
             # Step 4: GitHub workflow (split into trigger + poll to avoid duplicate triggers on resume)
             if not state.can_resume_from(RunStep.GITHUB_WORKFLOW_COMPLETED):
@@ -731,9 +799,6 @@ class WorkflowService:
                         {"github_workflow_run_id": state.github_workflow_run_id, "url": workflow_url}
                     )
 
-                if await maybe_stop(RunStep.GITHUB_WORKFLOW_COMPLETED):
-                    return
-
             # Step 5: Jenkins build (split into trigger + poll to avoid duplicate triggers on resume)
             if not state.can_resume_from(RunStep.JENKINS_COMPLETED):
                 # Use injected/fake client or create real one
@@ -743,61 +808,116 @@ class WorkflowService:
                 # Step 5a: Trigger build (skip if already triggered)
                 if not state.jenkins_build_number:
                     await ws_manager.send_step_start(release_id, 5, "Jenkins Build", "jenkins_completed")
-                    await ws_manager.send_step_progress(release_id, 5, "Triggering Jenkins build...")
 
-                    # Trigger build (returns queue URL)
-                    trigger_result = await loop.run_in_executor(
-                        None,
-                        lambda: jenkins_cli.trigger_build(
-                            release_version=state.build_version,
-                            ticket=state.promote_ticket_key,
+                    # Try to recover build number from queue URL if we have one
+                    # This handles the case where trigger succeeded but we lost connection
+                    # before getting the build number
+                    if state.jenkins_queue_url:
+                        await ws_manager.send_step_progress(
+                            release_id, 5, "Recovering build from previous queue..."
                         )
-                    )
-                    state.jenkins_queue_url = trigger_result["queue_url"]
-                    save_state()  # Save queue URL in case of interruption
+                        try:
+                            queue_item = await loop.run_in_executor(
+                                None, lambda: jenkins_cli.get_queue_item(state.jenkins_queue_url)
+                            )
+                            if "executable" in queue_item:
+                                state.jenkins_build_number = queue_item["executable"]["number"]
+                                state.jenkins_job_url = queue_item["executable"]["url"]
+                                state.current_step = RunStep.TRIGGERED_JENKINS
+                                save_state()
+                                await ws_manager.send_step_progress(
+                                    release_id, 5,
+                                    f"Recovered build #{state.jenkins_build_number}: {state.jenkins_job_url}"
+                                )
+                                logger.info(
+                                    f"Recovered Jenkins build #{state.jenkins_build_number} from queue URL"
+                                )
+                        except Exception as e:
+                            logger.warning(f"Could not recover from queue URL: {e}")
+                            # Clear stale queue URL so we can trigger fresh
+                            state.jenkins_queue_url = None
+                            save_state()
 
-                    # Wait for build to start (get build number)
-                    await ws_manager.send_step_progress(release_id, 5, "Waiting for build to start...")
-                    start_info = await loop.run_in_executor(
-                        None,
-                        lambda: jenkins_cli.wait_for_build_start(
-                            state.jenkins_queue_url,
-                            timeout_minutes=10,
+                    # If still no build number (recovery failed or no queue URL), trigger new build
+                    if not state.jenkins_build_number:
+                        await ws_manager.send_step_progress(release_id, 5, "Triggering Jenkins build...")
+
+                        # Trigger build (returns queue URL)
+                        trigger_result = await loop.run_in_executor(
+                            None,
+                            lambda: jenkins_cli.trigger_build(
+                                release_version=state.build_version,
+                                ticket=state.promote_ticket_key,
+                            )
                         )
-                    )
-                    state.jenkins_build_number = start_info["build_number"]
-                    state.jenkins_job_url = start_info["job_url"]
-                    state.current_step = RunStep.TRIGGERED_JENKINS
-                    save_state()  # Save build number immediately after getting it
+                        state.jenkins_queue_url = trigger_result["queue_url"]
+                        save_state()  # Save queue URL in case of interruption
 
-                    await ws_manager.send_step_progress(
-                        release_id, 5,
-                        f"Build #{state.jenkins_build_number} started: {state.jenkins_job_url}"
-                    )
+                        # Wait for build to start (get build number)
+                        await ws_manager.send_step_progress(release_id, 5, "Waiting for build to start...")
+                        start_info = await loop.run_in_executor(
+                            None,
+                            lambda: jenkins_cli.wait_for_build_start(
+                                state.jenkins_queue_url,
+                                timeout_minutes=10,
+                                max_consecutive_poll_failures=max_consecutive_poll_failures,
+                            )
+                        )
+                        state.jenkins_build_number = start_info["build_number"]
+                        state.jenkins_job_url = start_info["job_url"]
+                        state.current_step = RunStep.TRIGGERED_JENKINS
+                        save_state()  # Save build number immediately after getting it
+
+                        await ws_manager.send_step_progress(
+                            release_id, 5,
+                            f"Build #{state.jenkins_build_number} started: {state.jenkins_job_url}"
+                        )
 
                 # Step 5b: Wait for completion (can resume from here if interrupted)
+                # Races polling against a skip event so the user can proceed without waiting
                 if state.jenkins_build_number:
                     await ws_manager.send_step_progress(release_id, 5, "Waiting for build to complete...")
 
-                    result = await loop.run_in_executor(
+                    skip_event = self._skip_events.setdefault(release_id, asyncio.Event())
+                    poll_future = loop.run_in_executor(
                         None,
                         lambda: jenkins_cli.poll_build_by_number(
                             state.jenkins_build_number,
+                            max_consecutive_poll_failures=max_consecutive_poll_failures,
                         )
                     )
-                    # Update job_url in case it wasn't set (e.g., resumed from older state)
-                    state.jenkins_job_url = result.get("job_url", state.jenkins_job_url)
+                    skip_future = asyncio.ensure_future(skip_event.wait())
+
+                    done, pending = await asyncio.wait(
+                        {poll_future, skip_future}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in pending:
+                        task.cancel()
+
+                    jenkins_skipped = skip_future in done
+
+                    if not jenkins_skipped:
+                        result = poll_future.result()
+                        # Update job_url in case it wasn't set (e.g., resumed from older state)
+                        state.jenkins_job_url = result.get("job_url", state.jenkins_job_url)
+
+                    # Clean up skip event
+                    self._skip_events.pop(release_id, None)
 
                     state.current_step = RunStep.JENKINS_COMPLETED
                     save_state()
 
+                    step_result = {
+                        "jenkins_build_number": state.jenkins_build_number,
+                        "jenkins_job_url": state.jenkins_job_url,
+                    }
+                    if jenkins_skipped:
+                        step_result["skipped"] = True
+
                     await ws_manager.send_step_complete(
                         release_id, 5, "Jenkins Build", "jenkins_completed",
-                        {"jenkins_build_number": state.jenkins_build_number, "jenkins_job_url": state.jenkins_job_url}
+                        step_result
                     )
-
-                if await maybe_stop(RunStep.JENKINS_COMPLETED):
-                    return
 
             # Step 6: Create deployment ticket
             if not state.can_resume_from(RunStep.CREATED_DEPLOYMENT_TICKET) or not state.deployment_ticket_key:
@@ -818,15 +938,25 @@ class WorkflowService:
                 result = jira_cli.create_issue(deployment_payload)
                 state.deployment_ticket_key = result["key"]
                 state.deployment_ticket_id = result["id"]
+                save_state()  # Save ticket key immediately to prevent duplicates on resume
+                logger.info(f"Created deployment ticket: {state.deployment_ticket_key}")
 
-                # Link to previous deployment ticket if specified
+                # Link to previous deployment ticket if specified (non-fatal on failure)
                 if state.previous_deployment_ticket_key and not state.deployment_ticket_relates_linked:
-                    jira_cli.create_issue_link(
-                        inward_issue_key=state.previous_deployment_ticket_key,
-                        outward_issue_key=state.deployment_ticket_key,
-                        link_type="Relates",
-                    )
-                    state.deployment_ticket_relates_linked = True
+                    try:
+                        jira_cli.create_issue_link(
+                            inward_issue_key=state.previous_deployment_ticket_key,
+                            outward_issue_key=state.deployment_ticket_key,
+                            link_type="Relates",
+                        )
+                        state.deployment_ticket_relates_linked = True
+                        save_state()
+                        logger.info(
+                            f"Linked {state.deployment_ticket_key} to previous: "
+                            f"{state.previous_deployment_ticket_key}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to link tickets (non-fatal): {e}")
 
                 state.current_step = RunStep.CREATED_DEPLOYMENT_TICKET
                 save_state()
@@ -835,9 +965,6 @@ class WorkflowService:
                     release_id, 6, "Create Deployment Ticket", "created_deployment_ticket",
                     {"deployment_ticket_key": state.deployment_ticket_key, "url": format_jira_url(state.deployment_ticket_key)}
                 )
-
-                if await maybe_stop(RunStep.CREATED_DEPLOYMENT_TICKET):
-                    return
 
             # Step 7: Close promote ticket
             if not state.can_resume_from(RunStep.CLOSED_PROMOTE_TICKET):
@@ -874,9 +1001,6 @@ class WorkflowService:
                     release_id, 7, "Close Promote Ticket", "closed_promote_ticket",
                     {}
                 )
-
-                if await maybe_stop(RunStep.CLOSED_PROMOTE_TICKET):
-                    return
 
             # Complete
             state.completed_at = datetime.now().isoformat()

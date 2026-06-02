@@ -90,7 +90,8 @@ def prompt_cleanup_on_error(state: RunState, error: Exception) -> bool:
         console.print("\n[bold yellow]Created resources:[/bold yellow]")
         for resource_type, resource_id in resources:
             if resource_type in ("Promote Ticket", "Deployment Ticket"):
-                url = f"https://netskope.atlassian.net/browse/{resource_id}"
+                from create_release_ticket.config import get_app_config
+                url = f"{get_app_config().jira.base_url}/browse/{resource_id}"
                 console.print(f"  • {resource_type}: [link={url}]{resource_id}[/link]")
             else:
                 console.print(f"  • {resource_type}: {resource_id}")

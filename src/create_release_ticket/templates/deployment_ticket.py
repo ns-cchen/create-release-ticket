@@ -159,7 +159,7 @@ def build_deployment_ticket_payload(
             "content": [
                 {
                     "type": "text",
-                    "text": "SV5\nSJC1 (C4)\nAM2 (C4)\nFR4 (C4)\n\nZUR2\nRUH1\nSJC2\nFRA2\n\nSIN2\nLON3\nDFW3",
+                    "text": "SV5\nSJC1 (C4)\nAM2 (C4)\nFR4 (C4)\n\nZUR2\nRUH1\nSJC2\nFRA2\n\nSIN2\nLON3\nDFW3\nBOM3",
                 }
             ],
         },
@@ -391,42 +391,61 @@ def _build_deployment_order_table() -> dict[str, Any]:
                     _table_header("PDV"),
                 ],
             },
-            # Data rows
+            # Data rows — PDV column merged into a single rowspan cell on the first row
+            {
+                "type": "tableRow",
+                "content": [
+                    _table_cell("APAC + Europe (Day1)"),
+                    _table_cell("SIN2"),
+                    _table_cell("c1"),
+                    _table_cell("Between 6AM AND 10AM PST"),
+                    {
+                        "type": "tableCell",
+                        "attrs": {"rowspan": 11},
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": "OnCall/SRE runs the deployment."
+                                        " PDV runs as part of the deployment."
+                                        "\n\nWhen PDV fails, rerun the PDV"
+                                        " with PDV-only option.",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            },
             _table_row(
-                [
-                    "APAC + Europe (Day1)",
-                    "SIN2",
-                    "c1",
-                    "Between 6AM AND 10AM PST",
-                    "OnCall/SRE runs the deployment. PDV runs as part of the deployment.",
-                ]
+                ["APAC + Europe (Day1)", "FR4", "c4", "Between 12 Noon and 7 PM PST"]
             ),
             _table_row(
-                [
-                    "APAC + Europe (Day1)",
-                    "FR4",
-                    "c4",
-                    "Between 12 Noon and 7 PM PST",
-                    "When PDV fails, rerun the PDV with PDV-only option.",
-                ]
+                ["Australia + US + EU (Day2)", "MEL2", "c1", "Between 6AM AND 10AM PST"]
+            ),
+            _table_row(["Australia + US + EU (Day2)", "SJC1", "c4", "After 8PM PST"]),
+            _table_row(["Australia + US + EU (Day2)", "SJC2", "c1", "After 8PM PST"]),
+            _table_row(["Australia + US + EU (Day2)", "SV5", "c1", "After 8PM PST"]),
+            _table_row(["Australia + US + EU (Day2)", "DFW3", "c1", "After 8PM PST"]),
+            _table_row(
+                ["Australia + US + EU (Day2)", "RUH1", "c1", "Between 12 Noon and 5 PM PST"]
             ),
             _table_row(
-                ["Australia + US + EU (Day2)", "MEL2", "c1", "Between 6AM AND 10AM PST", ""]
-            ),
-            _table_row(["Australia + US + EU (Day2)", "SJC1", "c4", "After 8PM PST", ""]),
-            _table_row(["Australia + US + EU (Day2)", "SJC2", "c1", "After 8PM PST", ""]),
-            _table_row(["Australia + US + EU (Day2)", "DFW3", "c1", "After 8PM PST", ""]),
-            _table_row(
-                ["Australia + US + EU (Day2)", "RUH1", "c1", "Between 12 Noon and 5 PM PST", ""]
+                ["Australia + US + EU (Day2)", "FRA2", "c1", "Between 12 Noon and 5 PM PST"]
             ),
             _table_row(
-                ["Australia + US + EU (Day2)", "FRA2", "c1", "Between 12 Noon and 5 PM PST", ""]
+                ["Australia + US + EU (Day2)", "LON3", "c1", "Between 12 Noon and 5 PM PST"]
             ),
             _table_row(
-                ["Australia + US + EU (Day2)", "LON3", "c1", "Between 12 Noon and 5 PM PST", ""]
+                ["Australia + US + EU (Day2)", "ZUR2", "c1", "Between 12 Noon and 5 PM PST"]
             ),
             _table_row(
-                ["Australia + US + EU (Day2)", "ZUR2", "c1", "Between 12 Noon and 5 PM PST", ""]
+                ["Australia + US + EU (Day2)", "AM2", "c2", "Between 12 Noon and 5 PM PST"]
+            ),            
+            _table_row(
+                ["APAC + Europe (Day2)", "BOM3", "c1", "Between 12 Noon and 5 PM PST"]
             ),
             _table_row(
                 [

@@ -400,6 +400,7 @@ class FakeJenkinsClient:
         queue_url: str,
         poll_interval: int | None = None,
         timeout_minutes: int = 10,
+        max_consecutive_poll_failures: int | None = None,
     ) -> dict[str, Any]:
         """Return immediately with fake build info."""
         self._record("wait_for_build_start", queue_url, poll_interval=poll_interval)
@@ -430,6 +431,7 @@ class FakeJenkinsClient:
         build_number: int,
         poll_interval: int | None = None,
         timeout_minutes: int | None = None,
+        max_consecutive_poll_failures: int | None = None,
     ) -> dict[str, Any]:
         """Return completed build for given number."""
         self._record("poll_build_by_number", build_number, poll_interval=poll_interval)

@@ -10,8 +10,7 @@ jira:
   # Component
   component_id: "13002"
   component_name: "Query Service (QS)"
-  # User ID (your Jira account ID)
-  user_id: "712020:eedcb6b5-b34f-4247-a4a6-da3203c1fc7d"
+  # User ID: set via JIRA_USER_ID in .env (get from /rest/api/3/myself)
   # Transition IDs
   done_transition_id: "761"
 
@@ -19,8 +18,7 @@ github:
   owner: "netSkope"
   repo: "query-engine"
   workflow_file: "ep-falcon-distribution.yml"
-  # Default notify emails for workflow
-  notify_emails: "bgururajan@netskope.com rsindhu@netskope.com"
+  # Optional: set via GITHUB_NOTIFY_EMAILS in .env (space-separated)
   # Default destinations
   destinations: "commercial:pre-prod commercial:prod"
   manifest_service: "queryservice"
@@ -34,15 +32,17 @@ jenkins:
   slack_channel: "#queryservice-deployments,#eng-deployments,#deployments"
   stork_component_name: "queryservice"
   run_qe_pdv: "DEPLOY_AND_PDV"
-  pdv_config_image_tag: "2.0.121"
+  pdv_config_image_tag: "2.0.143"
   # Polling settings
-  poll_interval_seconds: 30
+  poll_interval_seconds: 60
   timeout_minutes: 60
+  # How many consecutive poll failures before giving up (handles VPN blips)
+  max_consecutive_poll_failures: 5
 
 # Timezone for ticket dates
 timezone: "+08:00"
 
 # Retry settings
 retry:
-  max_attempts: 3
+  max_attempts: 5
   backoff_seconds: 2

@@ -171,8 +171,10 @@ def extract_jira_ids(commits: list[dict[str, Any]]) -> list[str]:
 
 
 def format_jira_url(ticket_key: str) -> str:
-    """Format a Jira ticket URL."""
-    return f"https://netskope.atlassian.net/browse/{ticket_key}"
+    """Format a Jira ticket URL using the configured Jira base URL."""
+    from create_release_ticket.config import get_app_config  # local import avoids circular
+    base_url = get_app_config().jira.base_url
+    return f"{base_url}/browse/{ticket_key}"
 
 
 def format_github_compare_url(owner: str, repo: str, base: str, head: str) -> str:

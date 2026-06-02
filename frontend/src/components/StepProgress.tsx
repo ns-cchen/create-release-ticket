@@ -19,6 +19,7 @@ export default function StepProgress({ steps }: StepProgressProps) {
       links.push(
         <a
           key="promote"
+          data-testid="promote-ticket-link"
           href={`https://netskope.atlassian.net/browse/${result.promote_ticket_key}`}
           target="_blank"
           rel="noopener noreferrer"
@@ -33,6 +34,7 @@ export default function StepProgress({ steps }: StepProgressProps) {
       links.push(
         <a
           key="deploy"
+          data-testid="deployment-ticket-link"
           href={`https://netskope.atlassian.net/browse/${result.deployment_ticket_key}`}
           target="_blank"
           rel="noopener noreferrer"
@@ -49,6 +51,7 @@ export default function StepProgress({ steps }: StepProgressProps) {
       links.push(
         <a
           key="github"
+          data-testid="github-run-link"
           href={workflowUrl}
           target="_blank"
           rel="noopener noreferrer"
@@ -61,15 +64,20 @@ export default function StepProgress({ steps }: StepProgressProps) {
 
     if (result.jenkins_build_number) {
       links.push(
-        <a
-          key="jenkins"
-          href={String(result.jenkins_job_url)}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="ticket-link"
-        >
-          Build #{String(result.jenkins_build_number)}
-        </a>
+        <span key="jenkins" className="inline-flex items-center gap-1">
+          <a
+            data-testid="jenkins-build-link"
+            href={String(result.jenkins_job_url)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ticket-link"
+          >
+            Build #{String(result.jenkins_build_number)}
+          </a>
+          {result.skipped && (
+            <span className="text-amber-600 text-xs font-medium">(Skipped)</span>
+          )}
+        </span>
       )
     }
 
@@ -81,6 +89,8 @@ export default function StepProgress({ steps }: StepProgressProps) {
       {steps.map((step) => (
         <div
           key={step.number}
+          data-testid={`step-${step.number}`}
+          data-status={step.status}
           className={`step-item ${
             step.status === 'in_progress'
               ? 'active'

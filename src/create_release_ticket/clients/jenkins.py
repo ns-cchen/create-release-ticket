@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
@@ -11,10 +12,21 @@ from typing import Any
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
+logger = logging.getLogger(__name__)
+
 from create_release_ticket.clients.base import BaseClient
 from create_release_ticket.config import get_app_config, get_settings
 
 console = Console()
+
+
+class JenkinsConnectionError(Exception):
+    """User-friendly Jenkins connection error.
+
+    Raised when network operations fail with a helpful message
+    explaining what went wrong and how to fix it.
+    """
+    pass
 
 
 def _is_interactive() -> bool:
@@ -54,8 +66,72 @@ class JenkinsClient(BaseClient):
                 return True
             return False
         except Exception as e:
-            console.print(f"[red]✗ Jenkins authentication failed: {e}[/red]")
+            error_msg = self._format_connection_error(e)
+            console.print(f"[red]✗ Jenkins: {error_msg}[/red]")
             return False
+
+    def _format_connection_error(self, error: Exception) -> str:
+        """
+        Format connection errors into user-friendly messages.
+
+        Args:
+            error: The exception that occurred
+
+        Returns:
+            A helpful error message explaining what went wrong
+        """
+        import socket
+        from urllib.parse import urlparse
+
+        import httpx
+
+        # Extract hostname from base_url for context
+        hostname = urlparse(self.base_url).hostname or self.base_url
+
+        error_str = str(error)
+
+        # DNS resolution failure (Errno 8)
+        if isinstance(error, socket.gaierror) or "nodename nor servname" in error_str:
+            return (
+                f"Cannot resolve hostname '{hostname}'\n"
+                f"  → Check your VPN connection\n"
+                f"  → Verify JENKINS_URL in your .env file is correct"
+            )
+
+        # Connection refused
+        if isinstance(error, ConnectionRefusedError) or "Connection refused" in error_str:
+            return (
+                f"Connection refused to '{hostname}'\n"
+                f"  → Jenkins server may not be running\n"
+                f"  → Check if the port is correct"
+            )
+
+        # Timeout
+        if isinstance(error, httpx.TimeoutException) or "timed out" in error_str.lower():
+            return (
+                f"Connection timed out to '{hostname}'\n"
+                f"  → Network may be slow or server unresponsive\n"
+                f"  → Check your VPN connection"
+            )
+
+        # SSL/TLS errors
+        if "SSL" in error_str or "certificate" in error_str.lower():
+            return (
+                f"SSL/TLS error connecting to '{hostname}'\n"
+                f"  → Certificate may be invalid or expired\n"
+                f"  → Check if you need to update your CA certificates"
+            )
+
+        # Generic network error
+        if isinstance(error, (httpx.NetworkError, OSError)):
+            return (
+                f"Network error connecting to '{hostname}'\n"
+                f"  → Check your internet/VPN connection\n"
+                f"  → Error: {error}"
+            )
+
+        # Unknown error - include original for debugging
+        return f"Connection failed: {error}"
 
     def trigger_build(
         self,
@@ -73,6 +149,9 @@ class JenkinsClient(BaseClient):
 
         Returns:
             Dict with queue_url and other info
+
+        Raises:
+            JenkinsConnectionError: If connection to Jenkins fails
         """
         config = self.jenkins_config
 
@@ -93,10 +172,13 @@ class JenkinsClient(BaseClient):
         if extra_params:
             params.update(extra_params)
 
-        response = self.post(
-            f"/job/{config.job_name}/buildWithParameters",
-            data=params,
-        )
+        try:
+            response = self.post(
+                f"/job/{config.job_name}/buildWithParameters",
+                data=params,
+            )
+        except Exception as e:
+            raise JenkinsConnectionError(self._format_connection_error(e)) from e
 
         if response.status_code not in (200, 201):
             raise Exception(
@@ -123,12 +205,19 @@ class JenkinsClient(BaseClient):
 
         Returns:
             Queue item data
+
+        Raises:
+            JenkinsConnectionError: If connection to Jenkins fails
         """
         # Extract queue ID from URL
         # Queue URL format: https://jenkins.../queue/item/12345/
         api_url = f"{queue_url}api/json"
 
-        response = self.get(api_url.replace(self.base_url, ""))
+        try:
+            response = self.get(api_url.replace(self.base_url, ""))
+        except Exception as e:
+            raise JenkinsConnectionError(self._format_connection_error(e)) from e
+
         if response.status_code != 200:
             raise Exception(f"Failed to get queue item: {response.status_code}")
 
@@ -143,8 +232,14 @@ class JenkinsClient(BaseClient):
 
         Returns:
             Build data
+
+        Raises:
+            JenkinsConnectionError: If connection to Jenkins fails
         """
-        response = self.get(f"/job/{self.jenkins_config.job_name}/{build_number}/api/json")
+        try:
+            response = self.get(f"/job/{self.jenkins_config.job_name}/{build_number}/api/json")
+        except Exception as e:
+            raise JenkinsConnectionError(self._format_connection_error(e)) from e
 
         if response.status_code != 200:
             raise Exception(f"Failed to get build {build_number}: {response.status_code}")
@@ -160,8 +255,14 @@ class JenkinsClient(BaseClient):
 
         Returns:
             True if cancelled successfully
+
+        Raises:
+            JenkinsConnectionError: If connection to Jenkins fails
         """
-        response = self.post(f"/job/{self.jenkins_config.job_name}/{build_number}/stop")
+        try:
+            response = self.post(f"/job/{self.jenkins_config.job_name}/{build_number}/stop")
+        except Exception as e:
+            raise JenkinsConnectionError(self._format_connection_error(e)) from e
 
         if response.status_code not in (200, 302):
             console.print(f"[yellow]Warning: Could not cancel build {build_number}[/yellow]")
@@ -175,6 +276,7 @@ class JenkinsClient(BaseClient):
         queue_url: str,
         poll_interval: int | None = None,
         timeout_minutes: int = 10,
+        max_consecutive_poll_failures: int | None = None,
     ) -> dict[str, Any]:
         """
         Wait for build to start and return build info.
@@ -190,12 +292,15 @@ class JenkinsClient(BaseClient):
             Dict with build_number and job_url
 
         Raises:
-            Exception if build doesn't start within timeout
+            JenkinsConnectionError: If connection to Jenkins fails
+            Exception: If build doesn't start within timeout
         """
         if poll_interval is None:
             poll_interval = self.jenkins_config.poll_interval_seconds
 
         max_polls = (timeout_minutes * 60) // poll_interval
+        max_failures = max_consecutive_poll_failures or self.jenkins_config.max_consecutive_poll_failures
+        consecutive_failures = 0
 
         # Use Progress only in interactive terminals to avoid "Only one live display" error
         use_progress = _is_interactive()
@@ -218,6 +323,7 @@ class JenkinsClient(BaseClient):
             for _ in range(max_polls):
                 try:
                     queue_item = self.get_queue_item(queue_url)
+                    consecutive_failures = 0  # reset on success
 
                     if "executable" in queue_item:
                         build_number = queue_item["executable"]["number"]
@@ -237,6 +343,25 @@ class JenkinsClient(BaseClient):
                                 task,
                                 description=f"[cyan]In queue: {why[:60]}...",
                             )
+                except JenkinsConnectionError as e:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_failures:
+                        raise JenkinsConnectionError(
+                            f"Jenkins unreachable after {max_failures} consecutive poll failures "
+                            f"(~{max_failures * poll_interval}s). Last error:\n{e}"
+                        ) from e
+                    logger.warning(
+                        "Transient connection error polling queue (%d/%d): %s",
+                        consecutive_failures, max_failures, e,
+                    )
+                    if use_progress and progress and task is not None:
+                        progress.update(
+                            task,
+                            description=(
+                                f"[yellow]Queue poll — connection issue "
+                                f"({consecutive_failures}/{max_failures}), retrying..."
+                            ),
+                        )
                 except Exception as e:
                     if "Failed to get queue item" not in str(e):
                         raise
@@ -266,7 +391,8 @@ class JenkinsClient(BaseClient):
             Final build data with job_url
 
         Raises:
-            Exception if build fails or times out
+            JenkinsConnectionError: If connection to Jenkins fails
+            Exception: If build fails or times out
         """
         # Phase 1: Wait for build to start
         start_info = self.wait_for_build_start(queue_url, poll_interval, timeout_minutes=10)
@@ -283,6 +409,7 @@ class JenkinsClient(BaseClient):
         build_number: int,
         poll_interval: int | None = None,
         timeout_minutes: int | None = None,
+        max_consecutive_poll_failures: int | None = None,
     ) -> dict[str, Any]:
         """
         Poll an existing build by number until completion.
@@ -298,7 +425,8 @@ class JenkinsClient(BaseClient):
             Final build data with job_url
 
         Raises:
-            Exception if build fails or times out
+            JenkinsConnectionError: If connection to Jenkins fails
+            Exception: If build fails or times out
         """
         if poll_interval is None:
             poll_interval = self.jenkins_config.poll_interval_seconds
@@ -321,6 +449,9 @@ class JenkinsClient(BaseClient):
             else nullcontext()
         )
 
+        max_failures = max_consecutive_poll_failures or self.jenkins_config.max_consecutive_poll_failures
+        consecutive_failures = 0
+
         with progress_ctx as progress:
             task = None
             if use_progress and progress:
@@ -330,7 +461,31 @@ class JenkinsClient(BaseClient):
                 )
 
             for _ in range(max_polls):
-                build_data = self.get_build(build_number)
+                try:
+                    build_data = self.get_build(build_number)
+                    consecutive_failures = 0  # reset on success
+                except JenkinsConnectionError as e:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_failures:
+                        raise JenkinsConnectionError(
+                            f"Jenkins unreachable after {max_failures} consecutive poll failures "
+                            f"(~{max_failures * poll_interval}s). Last error:\n{e}"
+                        ) from e
+                    logger.warning(
+                        "Transient connection error polling build #%d (%d/%d): %s",
+                        build_number, consecutive_failures, max_failures, e,
+                    )
+                    if use_progress and progress and task is not None:
+                        progress.update(
+                            task,
+                            description=(
+                                f"[yellow]Build #{build_number} — connection issue "
+                                f"({consecutive_failures}/{max_failures}), retrying..."
+                            ),
+                        )
+                    time.sleep(poll_interval)
+                    continue
+
                 building = build_data.get("building", True)
                 result = build_data.get("result")
 

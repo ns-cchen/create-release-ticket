@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Environment Management (MANDATORY)
+
+- **MUST use mise** to manage ALL language runtimes and tools (Python, Node.js, Poetry, Go, etc.)
+- **NEVER use Homebrew, apt, or system package managers** for language runtimes
+- **NEVER create `.venv` using system Python** — always use `mise`-managed Python
+- When creating or recreating a `.venv`, use: `~/.local/share/mise/installs/python/<version>/bin/python3 -m venv .venv`
+- Run `mise install` to set up the environment before any development work
+
 ## Commands
 
 ```bash
