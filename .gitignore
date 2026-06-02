@@ -60,3 +60,4 @@ frontend/src/**/*.test.*
 frontend/playwright.config.ts
 frontend/test-results/
 frontend/playwright-report/
+docs/
